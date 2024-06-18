@@ -1,6 +1,6 @@
 package org.mosip.nist.nfiq1.common;
 
-public interface IImageIO {	
+public class ImageIO {	
 	public static final int IHDR_SIZE = 288; // len of hdr record (always even bytes)
 	public static final int SHORT_CHARS = 8; // # of ASCII chars to represent a short
 	public static final int BUFSIZE = 80; // default buffer size

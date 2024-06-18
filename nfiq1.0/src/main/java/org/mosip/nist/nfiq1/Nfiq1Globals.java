@@ -9,7 +9,7 @@ public class Nfiq1Globals implements INfiq1Globals
 	/***********************************************************************
 	  Default global means for Z-Normalization of feature vectors
 	************************************************************************/
-	private double dfltZnormMeans [] = {
+	private double[] dfltZnormMeans  = {
 		   2881.918457d,
 		   119.406013d,
 		   42.890446d,
@@ -26,7 +26,7 @@ public class Nfiq1Globals implements INfiq1Globals
 	/***********************************************************************
 	  Default global stddevs for Z-Normalization of feature vectors
 	************************************************************************/
-	private double dfltZnormStds[] = {
+	private double[] dfltZnormStds = {
 			1.522167e+03,
 			   6.759113e+01,
 			   2.685183e+01,
@@ -49,7 +49,7 @@ public class Nfiq1Globals implements INfiq1Globals
 	private int  dfltNOuts = INfiq.NFIQ_NUM_CLASSES;
 	private int dfltAcFuncHids = IMlp.SINUSOID;
 	private int dfltAcFuncOuts = IMlp.SINUSOID;
-	private double dfltWts[] = {
+	private double[] dfltWts = {
 		-3.119589e-01d, 6.611657e-01d,-5.026219e-01d, 3.649307e-01d,-8.559146e-01d,
 		 0.000000e+00d, 0.000000e+00d, 6.067616e-01d,-1.805089e-01d,-1.131759e-01d,
 		-4.456701e-02d,

@@ -24,7 +24,7 @@ jobs:
   build-maven-nfiq:
     uses: mosip/kattu/.github/workflows/maven-build.yml@master-java21
     with:
-      SERVICE_LOCATION: nfiq
+      SERVICE_LOCATION: ./nfiq1.0
       BUILD_ARTIFACT: nfiq
     secrets:
       OSSRH_USER: ${{ secrets.OSSRH_USER }}
@@ -39,7 +39,7 @@ jobs:
     needs: build-maven-nfiq
     uses: mosip/kattu/.github/workflows/maven-publish-to-nexus.yml@master-java21
     with:
-      SERVICE_LOCATION: nfiq
+      SERVICE_LOCATION: ./nfiq1.0
     secrets:
       OSSRH_USER: ${{ secrets.OSSRH_USER }}
       OSSRH_SECRET: ${{ secrets.OSSRH_SECRET }}
@@ -53,7 +53,7 @@ jobs:
     if: "${{  github.event_name != 'pull_request' }}"
     uses: mosip/kattu/.github/workflows/maven-sonar-analysis.yml@master-java21
     with:
-      SERVICE_LOCATION: nfiq
+      SERVICE_LOCATION: ./nfiq1.0
       PROJECT_KEY: 'mosip_nfiq'
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

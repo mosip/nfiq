@@ -4,7 +4,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>io.mosip</groupId>
 	<artifactId>nfiq1.0</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.1.0</version>
 	<name>nfiq1.0</name>
 	<description>NFIQ</description>
 	<url>https://https://github.com/mosip/nfiq</url>

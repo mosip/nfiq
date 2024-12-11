@@ -4,7 +4,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>io.mosip</groupId>
 	<artifactId>nfiq1.0</artifactId>
-	<version>0.1.0-SNAPSHOT</version>
+	<version>0.0.1-SNAPSHOT</version>
 	<name>nfiq1.0</name>
 	<description>NFIQ</description>
 	<url>https://https://github.com/mosip/nfiq</url>
@@ -67,9 +67,9 @@
 		<github.mhshams.jnbis.version>2.0.2</github.mhshams.jnbis.version>
 
 		<!-- Mosip kernel -->
-		<kernel.bom.version>1.3.0-SNAPSHOT</kernel.bom.version>
-		<kernel.core.version>1.3.0-SNAPSHOT</kernel.core.version>
-		<mosip.biometrics.util.version>1.3.0-SNAPSHOT</mosip.biometrics.util.version>
+		<kernel.bom.version>1.2.1-SNAPSHOT</kernel.bom.version>
+		<kernel.core.version>1.2.1-SNAPSHOT</kernel.core.version>
+		<mosip.biometrics.util.version>1.2.1-SNAPSHOT</mosip.biometrics.util.version>
 	</properties>
 
 	<dependencyManagement>

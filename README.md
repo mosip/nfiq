@@ -1,3 +1,5 @@
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?branch=release-0.1.x&project=mosip_nfiq&metric=alert_status)](https://sonarcloud.io/dashboard?branch=release-0.1.x&id=mosip_nfiq)
+
 # NFIQ
 
 This repository hosts the NFIQ (NIST Fingerprint Image Quality) implementations and services, providing tools to assess the quality of fingerprint images in compliance with NFIQ standards. It supports MOSIP's biometric ecosystem, offering reliable and standardized quality scoring methods.

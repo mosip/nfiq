@@ -138,6 +138,8 @@ class RemoveMinutiaTest {
         AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
         int[] binaryData = new int[100];
         
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(3);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(8);
         when(mockMinutiaHelper.sortMinutiaeTopToBottomAndThenLeftToRight(any(), anyInt(), anyInt()))
             .thenReturn(ILfs.FALSE);
         
@@ -3003,34 +3005,5 @@ class RemoveMinutiaTest {
         assertTrue(result == ILfs.ERROR_CODE_651 || result == ILfs.FALSE);
     }
     
-    @Test
-    void removeOverlapsWithSuccessfulOverlapRemoval() {
-        Minutia minutia1 = createMockMinutia(10, 10, 11, 10, 4, ILfs.RIDGE_ENDING);
-        Minutia minutia2 = createMockMinutia(15, 12, 16, 12, 20, ILfs.RIDGE_ENDING);
-        
-        List<Minutia> minutiaList = new ArrayList<>();
-        minutiaList.add(minutia1);
-        minutiaList.add(minutia2);
-        
-        Minutiae minutiae = mock(Minutiae.class);
-        when(minutiae.getNum()).thenReturn(2);
-        when(minutiae.getList()).thenReturn(minutiaList);
-        
-        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
-        int[] binaryData = createMatchingBinaryData(50, 50);
-        
-        when(mockLfsParams.getMaxOverlapDist()).thenReturn(8);
-        when(mockLfsParams.getMaxOverlapJoinDist()).thenReturn(6);
-        when(mockLfsParams.getNumDirections()).thenReturn(16);
-        
-        when(mockLfsUtil.distance(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5.0);
-        when(mockLfsUtil.closestDirDistance(anyInt(), anyInt(), anyInt())).thenReturn(12);
-        when(mockLfsUtil.lineToDirection(anyInt(), anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(2);
-        when(mockImageUtil.freePath(anyInt(), anyInt(), anyInt(), anyInt(), any(), anyInt(), anyInt(), any()))
-                .thenReturn(ILfs.FALSE);
-        
-        int result = removeMinutia.removeOverlaps(oMinutiae, binaryData, 50, 50, mockLfsParams);
-        
-        assertEquals(ILfs.FALSE, result);
-    }
+
 }

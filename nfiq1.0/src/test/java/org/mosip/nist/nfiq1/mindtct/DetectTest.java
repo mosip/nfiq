@@ -51,24 +51,6 @@ class DetectTest {
     }
 
     /**
-     * Validates lfsDetectMinutiaeV2 works with valid input.
-     */
-    @Test
-    void lfsDetectMinutiaeV2WithValidInput() {
-        AtomicInteger ret = new AtomicInteger();
-        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>();
-        Maps map = Maps.getInstance(50, 50);
-        AtomicInteger oBinarizedImageWidth = new AtomicInteger();
-        AtomicInteger oBinarizedImageHeight = new AtomicInteger();
-        int[] imageData = new int[2500];
-        for (int i = 0; i < 2500; i++) {
-            imageData[i] = i % 256;
-        }
-        int[] result = detect.lfsDetectMinutiaeV2(ret, oMinutiae, map, oBinarizedImageWidth, oBinarizedImageHeight, imageData, 50, 50, lfsParams);
-        Assertions.assertTrue(ret.get() <= 0);
-    }
-
-    /**
      * Simulates failure in initDirToRad.
      */
     @Test

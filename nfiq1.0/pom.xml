@@ -77,7 +77,7 @@
         <junit.jupiter.version>5.10.2</junit.jupiter.version>
 
         <!-- Sonar -->
-        <sonar.coverage.exclusions>**/common/**,**/Defs.java,**/Nfiq1.java,**/NgiqGlobals.java,**/Nist.java</sonar.coverage.exclusions>
+        <sonar.coverage.exclusions>**/common/**,**/Defs.java,**/Nfiq1.java,**/Nfiq1Globals.java,**/Nist.java</sonar.coverage.exclusions>
 	</properties>
 
 	<dependencyManagement>

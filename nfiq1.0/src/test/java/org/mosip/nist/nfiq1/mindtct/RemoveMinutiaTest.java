@@ -61,10 +61,14 @@ class RemoveMinutiaTest {
         when(mockLfsParams.getNumDirections()).thenReturn(16);
         when(mockLfsParams.getMaxOverlapDist()).thenReturn(8);
         when(mockLfsParams.getMaxOverlapJoinDist()).thenReturn(6);
+        when(mockLfsParams.getRmValidNbrMin()).thenReturn(7);
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(6);
+        when(mockLfsParams.getTransDirPixel()).thenReturn(6);
 
         if (removeMinutia.getClass().getDeclaredFields().length > 0) {
             try {
                 ReflectionTestUtils.setField(removeMinutia, "line", mockLine);
+                ReflectionTestUtils.setField(removeMinutia, "map", mockMaps);
             } catch (Exception e) {
 
             }
@@ -133,6 +137,12 @@ class RemoveMinutiaTest {
     void removeFalseMinutiaV2WithEmptyMinutiae() {
         AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
         int[] binaryData = new int[100];
+        
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(3);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(8);
+        when(mockMinutiaHelper.sortMinutiaeTopToBottomAndThenLeftToRight(any(), anyInt(), anyInt()))
+            .thenReturn(ILfs.FALSE);
+        
         int result = removeMinutia.removeFalseMinutiaV2(oMinutiae, binaryData, 10, 10, mockMaps, 5, 5, mockLfsParams);
         assertEquals(ILfs.FALSE, result);
     }
@@ -1040,6 +1050,78 @@ class RemoveMinutiaTest {
         assertEquals(ILfs.FALSE, result);
     }
 
+
+    @Test
+    void removeNearInvblocksV2WithEmptyMinutiae() {
+        AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
+        AtomicIntegerArray directionMap = createValidDirectionMap(25);
+        
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(6);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(16);
+        when(mockLfsParams.getRmValidNbrMin()).thenReturn(7);
+        
+        int result = removeMinutia.removeNearInvblocksV2(oMinutiae, directionMap, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+    }
+    
+    @Test
+    void removeNearInvblocksV2WithMarginTooLarge() {
+        AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
+        AtomicIntegerArray directionMap = createValidDirectionMap(25);
+        
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(10);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(16);
+        
+        int result = removeMinutia.removeNearInvblocksV2(oMinutiae, directionMap, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.ERROR_CODE_620, result);
+    }
+    
+    @Test
+    void removePointingInvblockV2WithEmptyMinutiae() {
+        AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
+        AtomicIntegerArray directionMap = createValidDirectionMap(25);
+        
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        when(mockLfsParams.getTransDirPixel()).thenReturn(6);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(8);
+        
+        int result = removeMinutia.removePointingInvblockV2(oMinutiae, directionMap, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+    }
+    
+    @Test
+    void removePointingInvblockV2WithInvalidDirection() {
+        Minutia minutia = createMockMinutia(24, 24, 25, 24, 8, ILfs.RIDGE_ENDING);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenAnswer(invocation -> minutiaList.size());
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        AtomicIntegerArray directionMap = createInvalidDirectionMap(25);
+        
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        when(mockLfsParams.getTransDirPixel()).thenReturn(6);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(8);
+        
+        when(mockMinutiaHelper.removeMinutia(anyInt(), any())).thenAnswer(invocation -> {
+            int index = invocation.getArgument(0);
+            if (index >= 0 && index < minutiaList.size()) {
+                minutiaList.remove(index);
+            }
+            return ILfs.FALSE;
+        });
+        
+        int result = removeMinutia.removePointingInvblockV2(oMinutiae, directionMap, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+    }
 
     @Test
     void removeOverlapsWithInsufficientDirectionDifference() {
@@ -2732,4 +2814,196 @@ class RemoveMinutiaTest {
     private int[] createBinaryImageData(int width, int height) {
         return new int[width * height];
     }
+    
+    @Test
+    void removeFalseMinutiaV2WithSystemError() {
+        AtomicReference<Minutiae> oMinutiae = createMinutiaeWithBifurcation();
+        int[] binaryData = createBinaryImageData(20, 20);
+        
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(10);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(8);
+        
+        int result = removeMinutia.removeFalseMinutiaV2(oMinutiae, binaryData, 20, 20, mockMaps, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.ERROR_CODE_620, result);
+    }
+    
+    @Test
+    void removeHolesWithLoopFound() {
+        Minutia minutia = mock(Minutia.class);
+        when(minutia.getType()).thenReturn(ILfs.BIFURCATION);
+        when(minutia.getX()).thenReturn(10);
+        when(minutia.getY()).thenReturn(10);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenAnswer(invocation -> minutiaList.size());
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        int[] binaryData = createBinaryImageData(20, 20);
+        
+        when(mockLoop.onLoop(any(), anyInt(), any(), anyInt(), anyInt()))
+            .thenReturn(ILfs.LOOP_FOUND);
+        
+        when(mockMinutiaHelper.removeMinutia(anyInt(), any())).thenAnswer(invocation -> {
+            int index = invocation.getArgument(0);
+            if (index >= 0 && index < minutiaList.size()) {
+                minutiaList.remove(index);
+            }
+            return ILfs.FALSE;
+        });
+        
+        int result = removeMinutia.removeHoles(oMinutiae, binaryData, 20, 20, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+        assertTrue(minutiaList.isEmpty());
+    }
+    
+    @Test
+    void removeHooksWithInvalidDirectionError() {
+        Minutia minutia1 = createMockMinutia(10, 10, 11, 10, 4, ILfs.RIDGE_ENDING);
+        Minutia minutia2 = createMockMinutia(15, 12, 16, 12, 8, ILfs.BIFURCATION);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia1);
+        minutiaList.add(minutia2);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenReturn(2);
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        int[] binaryData = createMatchingBinaryData(50, 50);
+        
+        when(mockLfsParams.getMaxRmTestDist()).thenReturn(8);
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        
+        when(mockLfsUtil.distance(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5.0);
+        when(mockLfsUtil.closestDirDistance(anyInt(), anyInt(), anyInt())).thenReturn(ILfs.INVALID_DIR);
+        
+        int result = removeMinutia.removeHooks(oMinutiae, binaryData, 50, 50, mockLfsParams);
+        
+        assertTrue(result == ILfs.ERROR_CODE_641 || result == ILfs.FALSE);
+    }
+    
+    @Test
+    void removeHooksWithHookFound() {
+        Minutia minutia1 = createMockMinutia(10, 10, 11, 10, 4, ILfs.RIDGE_ENDING);
+        Minutia minutia2 = createMockMinutia(15, 12, 16, 12, 20, ILfs.BIFURCATION);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia1);
+        minutiaList.add(minutia2);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenReturn(2);
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        int[] binaryData = createMatchingBinaryData(50, 50);
+        
+        when(mockLfsParams.getMaxRmTestDist()).thenReturn(8);
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        when(mockLfsParams.getMaxHookLen()).thenReturn(15);
+        
+        when(mockLfsUtil.distance(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5.0);
+        when(mockLfsUtil.closestDirDistance(anyInt(), anyInt(), anyInt())).thenReturn(12);
+        when(mockLoop.onHook(any(), any(), anyInt(), any(), anyInt(), anyInt())).thenReturn(ILfs.HOOK_FOUND);
+        
+        int result = removeMinutia.removeHooks(oMinutiae, binaryData, 50, 50, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+    }
+    
+    @Test
+    void removeNearInvblocksV2WithMinutiaInMargin() {
+        Minutia minutia = createMockMinutia(8, 8, 9, 8, 4, ILfs.RIDGE_ENDING);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenAnswer(invocation -> minutiaList.size());
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        AtomicIntegerArray directionMap = createMixedDirectionMap(25);
+        
+        when(mockLfsParams.getInvBlockMargin()).thenReturn(6);
+        when(mockLfsParams.getBlockOffsetSize()).thenReturn(16);
+        when(mockLfsParams.getRmValidNbrMin()).thenReturn(7);
+        
+        when(mockMaps.numValid8Nbrs(any(), anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5);
+        
+        when(mockMinutiaHelper.removeMinutia(anyInt(), any())).thenAnswer(invocation -> {
+            int index = invocation.getArgument(0);
+            if (index >= 0 && index < minutiaList.size()) {
+                minutiaList.remove(index);
+            }
+            return ILfs.FALSE;
+        });
+        
+        int result = removeMinutia.removeNearInvblocksV2(oMinutiae, directionMap, 5, 5, mockLfsParams);
+        
+        assertEquals(ILfs.FALSE, result);
+    }
+    
+    @Test
+    void removeIslandsAndLakesWithInvalidDirectionError() {
+        Minutia minutia1 = createMockMinutia(10, 10, 11, 10, 4, ILfs.RIDGE_ENDING);
+        Minutia minutia2 = createMockMinutia(15, 12, 16, 12, 8, ILfs.RIDGE_ENDING);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia1);
+        minutiaList.add(minutia2);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenReturn(2);
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        int[] binaryData = createMatchingBinaryData(50, 50);
+        
+        when(mockLfsParams.getMaxRmTestDist()).thenReturn(8);
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        
+        when(mockLfsUtil.distance(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5.0);
+        when(mockLfsUtil.closestDirDistance(anyInt(), anyInt(), anyInt())).thenReturn(ILfs.INVALID_DIR);
+        
+        int result = removeMinutia.removeIslandsAndLakes(oMinutiae, binaryData, 50, 50, mockLfsParams);
+        
+        assertTrue(result == ILfs.ERROR_CODE_611 || result == ILfs.FALSE);
+    }
+    
+    @Test
+    void removeOverlapsWithInvalidDirectionError() {
+        Minutia minutia1 = createMockMinutia(10, 10, 11, 10, 4, ILfs.RIDGE_ENDING);
+        Minutia minutia2 = createMockMinutia(15, 12, 16, 12, 8, ILfs.RIDGE_ENDING);
+        
+        List<Minutia> minutiaList = new ArrayList<>();
+        minutiaList.add(minutia1);
+        minutiaList.add(minutia2);
+        
+        Minutiae minutiae = mock(Minutiae.class);
+        when(minutiae.getNum()).thenReturn(2);
+        when(minutiae.getList()).thenReturn(minutiaList);
+        
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(minutiae);
+        int[] binaryData = createMatchingBinaryData(50, 50);
+        
+        when(mockLfsParams.getMaxOverlapDist()).thenReturn(8);
+        when(mockLfsParams.getNumDirections()).thenReturn(16);
+        
+        when(mockLfsUtil.distance(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(5.0);
+        when(mockLfsUtil.closestDirDistance(anyInt(), anyInt(), anyInt())).thenReturn(ILfs.INVALID_DIR);
+        
+        int result = removeMinutia.removeOverlaps(oMinutiae, binaryData, 50, 50, mockLfsParams);
+        
+        assertTrue(result == ILfs.ERROR_CODE_651 || result == ILfs.FALSE);
+    }
+    
+
 }

@@ -49,7 +49,7 @@ To use NFIQ 1.0 in your MOSIP service, add it as a Maven dependency:
 ### Steps to Set Up:
 
 1. **Clone the repository**
-   ```bash
+   ```text
    git clone https://github.com/mosip/nfiq.git
    cd nfiq/nfiq1.0
    ```
@@ -57,7 +57,7 @@ To use NFIQ 1.0 in your MOSIP service, add it as a Maven dependency:
 2. **Build the project**
 
    Use Maven to build the project and install it to your local Maven repository.
-   ```bash
+   ```text
    mvn clean install -Dgpg.skip=true
    ```
 
@@ -68,17 +68,17 @@ To use NFIQ 1.0 in your MOSIP service, add it as a Maven dependency:
    **Sample ISO files** for testing are also available in the `test` folder for reference.
 
    Navigate to the target directory and execute the batch files:
-   ```bash
+   ```text
    cd target
    ```
 
    For JP2 image format:
-   ```bash
+   ```text
    runJP2.bat
    ```
 
    For WSQ image format:
-   ```bash
+   ```text
    runWSQ.bat
    ```
 
@@ -121,7 +121,7 @@ To use NFIQ 1.0 in your MOSIP service, add it as a Maven dependency:
     - **Confidence**: Confidence value for the computed quality score
 
    **Command-line usage:**
-   ```bash
+   ```text
    java -cp nfiq1.0-<version>.jar;lib\*;test-classes\ org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=<path-to-iso-file>" "logs=0"
    ```
 

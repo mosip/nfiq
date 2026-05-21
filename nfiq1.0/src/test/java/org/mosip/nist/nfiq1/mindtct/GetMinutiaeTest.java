@@ -28,6 +28,7 @@ class GetMinutiaeTest {
      */
     @BeforeEach
     void setUp() {
+        Maps.resetInstance();
         getMinutiae = GetMinutiae.getInstance();
         lfsParams = new LfsParams(128, 1, 8, 24, 8, 16, Math.PI/2, 3, 0.2, 3, 7, 7, 5, 5, 2, 10, 5, 4, 100000.0, 3.8, 50000000.0, 2, 0.7, 0.75, 7, 9, 11, 3, 10, Math.PI/3, 14, 20, 1.0, 2.25, 20, 20, 5, 2, 15.0, 10.0, 4.0, 32000.0, 8, 15, 15, 6, 15, 7, 6, 7, 8, 6, 10, 20, 2.0, 20, 3, 12, 10, 8, 0.5, 2.25, 5, 10);
     }
@@ -47,10 +48,11 @@ class GetMinutiaeTest {
      */
     @Test
     void getMinutiaeWithValidInput() {
+        GetMinutiae spyGetMinutiae = Mockito.spy(getMinutiae);
         AtomicInteger ret = new AtomicInteger();
         AtomicReference<Minutiae> oMinutiae = new AtomicReference<>();
         Maps imageMap = Maps.getInstance(50, 50);
-        Quality qualityMap = Quality.getInstance();
+        Quality mockQualityMap = Mockito.mock(Quality.class);
         AtomicInteger oBinarizedImageWidth = new AtomicInteger();
         AtomicInteger oBinarizedImageHeight = new AtomicInteger();
         AtomicInteger oBinarizedImageDepth = new AtomicInteger();
@@ -59,11 +61,36 @@ class GetMinutiaeTest {
             imageData[i] = i % 256;
         }
 
-        int[] result = getMinutiae.getMinutiae(ret, oMinutiae, imageMap, qualityMap,
+        Detect mockDetect = Mockito.mock(Detect.class);
+        Mockito.doReturn(mockDetect).when(spyGetMinutiae).getDetect();
+
+        int[] mockBinarizedData = new int[2500];
+        Mockito.when(mockDetect.lfsDetectMinutiaeV2(
+                        Mockito.any(), Mockito.any(), Mockito.any(),
+                        Mockito.any(), Mockito.any(), Mockito.any(),
+                        Mockito.anyInt(), Mockito.anyInt(), Mockito.any()))
+                .thenAnswer(invocation -> {
+                    AtomicInteger retArg = invocation.getArgument(0);
+                    retArg.set(ILfs.FALSE);
+                    return mockBinarizedData;
+                });
+
+        Mockito.when(mockQualityMap.generateQualityMap(Mockito.any()))
+                .thenReturn(ILfs.FALSE);
+
+        Mockito.when(mockQualityMap.combinedMinutiaQuality(
+                        Mockito.any(), Mockito.any(), Mockito.anyInt(),
+                        Mockito.any(), Mockito.anyInt(), Mockito.anyInt(),
+                        Mockito.anyInt(), Mockito.anyDouble()))
+                .thenReturn(ILfs.FALSE);
+
+        int[] result = spyGetMinutiae.getMinutiae(ret, oMinutiae, imageMap, mockQualityMap,
                 oBinarizedImageWidth, oBinarizedImageHeight, oBinarizedImageDepth,
                 imageData, 50, 50, 8, 500.0, lfsParams);
 
-        Assertions.assertTrue(ret.get() <= 0);
+        Assertions.assertEquals(ILfs.FALSE, ret.get());
+        Assertions.assertNotNull(result);
+        Assertions.assertEquals(8, oBinarizedImageDepth.get());
     }
 
     /**

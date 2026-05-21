@@ -28,6 +28,7 @@ class GetMinutiaeTest {
      */
     @BeforeEach
     void setUp() {
+        Maps.resetInstance();
         getMinutiae = GetMinutiae.getInstance();
         lfsParams = new LfsParams(128, 1, 8, 24, 8, 16, Math.PI/2, 3, 0.2, 3, 7, 7, 5, 5, 2, 10, 5, 4, 100000.0, 3.8, 50000000.0, 2, 0.7, 0.75, 7, 9, 11, 3, 10, Math.PI/3, 14, 20, 1.0, 2.25, 20, 20, 5, 2, 15.0, 10.0, 4.0, 32000.0, 8, 15, 15, 6, 15, 7, 6, 7, 8, 6, 10, 20, 2.0, 20, 3, 12, 10, 8, 0.5, 2.25, 5, 10);
     }

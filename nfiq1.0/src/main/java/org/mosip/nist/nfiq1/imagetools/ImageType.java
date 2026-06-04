@@ -6,16 +6,16 @@ import org.mosip.nist.nfiq1.util.StringUtil;
 
 public class ImageType extends ImageTools {
 	private ImageType() {
-        super();
-    }
+		super();
+	}
 
-    private static class Holder {
-        private static final ImageType INSTANCE = new ImageType();
-    }
+	private static class Holder {
+		private static final ImageType INSTANCE = new ImageType();
+	}
 
-    public static synchronized ImageType getInstance() {
-        return Holder.INSTANCE;
-    }
+	public static synchronized ImageType getInstance() {
+		return Holder.INSTANCE;
+	}
 
 	public static final int UNKNOWN_IMG = -1;
 	public static final int RAW_IMG = 0;

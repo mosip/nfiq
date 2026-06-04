@@ -1,0 +1,125 @@
+THIRD-PARTY-NOTICES
+
+This project includes third-party packages that are distributed under various open-source licenses. Below is a list of packages and their associated licenses.
+
+================================================================================
+Package: Apache Maven Javadoc Plugin
+Version: 3.2.0
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-javadoc-plugin/
+================================================================================
+
+================================================================================
+Package: Apache Maven GPG Plugin
+Version: 1.5
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-gpg-plugin/
+================================================================================
+
+================================================================================
+Package: JNBIS (Fingerprint Image Decoder)
+Name: com.github.mhshams:jnbis
+Version: 2.0.2
+License: Apache License 2.0
+Homepage: https://github.com/mhshams/jnbis
+================================================================================
+
+================================================================================
+Package: Apache Maven Compiler Plugin
+Version: 3.11.0
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-compiler-plugin/
+================================================================================
+
+================================================================================
+Package: Lombok
+Name: org.projectlombok:lombok
+Version: Not specified
+License: MIT License (Inferred from project's official repository)
+Homepage: https://projectlombok.org
+================================================================================
+
+================================================================================
+Package: SLF4J API
+Name: org.slf4j:slf4j-api
+Version: Not specified
+License: MIT License (Inferred)
+Homepage: http://www.slf4j.org
+================================================================================
+
+================================================================================
+Package: pl.project13.maven:git-commit-id-plugin
+Version: 3.0.1
+License: LGPL-3.0
+Homepage: https://github.com/git-commit-id/git-commit-id-maven-plugin
+================================================================================
+
+================================================================================
+Package: Apache Maven Dependency Plugin
+Version: 3.1.2
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-dependency-plugin/
+================================================================================
+
+================================================================================
+Package: Apache Maven Source Plugin
+Version: 3.3.1
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-source-plugin/
+================================================================================
+
+================================================================================
+Package: MOSIP Kernel BOM
+Name: io.mosip.kernel:kernel-bom
+Version: 1.3.0-SNAPSHOT
+License: Mozilla Public License 2.0 (Inferred)
+Homepage: https://mosip.io
+================================================================================
+
+================================================================================
+Package: Apache Commons Lang3
+Name: org.apache.commons:commons-lang3
+Version: Not specified
+License: Apache License 2.0 (Inferred)
+Homepage: https://commons.apache.org/proper/commons-lang/
+================================================================================
+
+================================================================================
+Package: Apache Maven JAR Plugin
+Version: 3.0.2
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-jar-plugin/
+================================================================================
+
+================================================================================
+Package: SLF4J Log4j Binding
+Name: org.slf4j:slf4j-log4j12
+Version: Not specified
+License: MIT License (Inferred)
+Homepage: http://www.slf4j.org
+================================================================================
+
+================================================================================
+Package: JAI ImageIO JPEG2000
+Name: com.github.jai-imageio:jai-imageio-jpeg2000
+Version: 1.3.0
+License: Dual License – JJ2000 Open Source License AND BSD-3-Clause (with Nuclear Use Restriction Clause)
+Homepage: https://github.com/jai-imageio/jai-imageio-core
+================================================================================
+
+================================================================================
+Package: MOSIP Biometrics Utility
+Name: io.mosip.biometric.util:biometrics-util
+Version: 1.3.0-SNAPSHOT
+License: Mozilla Public License 2.0 (Inferred)
+Homepage: https://mosip.io
+================================================================================
+
+================================================================================
+Package: Apache Maven Surefire Plugin
+Version: 2.22.0
+License: Apache License 2.0
+Homepage: https://maven.apache.org/plugins/maven-surefire-plugin/
+================================================================================
+
+Full license texts and additional details for each of the above packages are available in the license/ directory of this repository. Please refer to those files or the original source of each package for complete legal terms and conditions.

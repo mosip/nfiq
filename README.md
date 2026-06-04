@@ -126,8 +126,8 @@ To use NFIQ 1.0 in your MOSIP service, add it as a Maven dependency:
    ```
 
    Parameters:
-  - `imgfile`: Path to the ISO file containing JP2 or WSQ fingerprint image
-  - `logs`: Set to `0` for minimal output, `1` for detailed logs
+    - `imgfile`: Path to the ISO file containing JP2 or WSQ fingerprint image
+    - `logs`: Set to `0` for minimal output, `1` for detailed logs
 
 ## Documentation
 

@@ -1,1 +1,1 @@
-java -cp nfiq1.0-0.1.0-beta.1.jar;lib\*;test-classes\ org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_wsq.iso" "logs=0"
+java -cp nfiq1.0-0.1.1-SNAPSHOT.jar;lib\*;test-classes\ org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_wsq.iso" "logs=0"

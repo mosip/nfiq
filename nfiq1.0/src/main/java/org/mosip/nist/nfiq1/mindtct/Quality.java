@@ -83,10 +83,11 @@ public class Quality extends MindTct implements IQuality {
 		int arrayPos2;
 		int qualityOffset;
 
-		setMappedImageWidth(map.getMappedImageWidth().get());
-		setMappedImageHeight(map.getMappedImageHeight().get());
-		setQualityMap(new AtomicIntegerArray(this.mappedImageWidth * this.mappedImageHeight));
-
+		//if (getQualityMap() == null) {
+			setMappedImageWidth(map.getMappedImageWidth().get());
+			setMappedImageHeight(map.getMappedImageHeight().get());
+			setQualityMap(new AtomicIntegerArray(this.mappedImageWidth * this.mappedImageHeight));
+		//}
 		/* Foreach row of blocks in maps ... */
 		for (int thisY = 0; thisY < getMappedImageHeight(); thisY++) {
 			/* Foreach block in current row ... */

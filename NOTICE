@@ -1,0 +1,39 @@
+MOSIP
+Copyright (c) 2022
+Modular Open Source Identity Platform
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
+The following components are licensed under the Apache License 2.0
+and therefore require attribution. Their original NOTICE contents
+are retained as required by the license.
+
+
+===============================================================================
+Apache License 2.0 Components
+===============================================================================
+
+ • Apache Maven Javadoc Plugin (3.2.0)
+ • Apache Maven GPG Plugin (1.5)
+ • JNBIS – Fingerprint Image Decoder (2.0.2)
+ • Apache Maven Compiler Plugin (3.11.0)
+ • Apache Maven Dependency Plugin (3.1.2)
+ • Apache Maven Source Plugin (3.3.1)
+ • Apache Commons Lang3
+ • Apache Maven JAR Plugin (3.0.2)
+ • Apache Maven Surefire Plugin (2.22.0)
+
+
+===============================================================================
+Notes
+===============================================================================
+
+Components licensed under MIT (Lombok, SLF4J API, SLF4J Log4j Binding,
+GitHub Actions workflows), MPL-2.0 (MOSIP Kernel BOM and Biometrics Util),
+and BSD-3-Clause-No-Nuclear (JAI ImageIO JPEG2000) do not require NOTICE
+attribution. Their license texts are included separately.
+
+Full license texts for all dependencies are available in the `license/`
+directory or from the original project repositories.
+

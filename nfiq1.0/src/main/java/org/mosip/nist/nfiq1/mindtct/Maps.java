@@ -62,6 +62,10 @@ public class Maps extends MindTct implements IMaps {
 		return instance;
 	}
 
+	static synchronized void resetInstance() {
+		instance = null;
+	}
+
 	public static synchronized Maps getInstance(int mappedImageWidth, int mappedImageHeight) {
 		if (instance == null) {
 			instance = new Maps(mappedImageWidth, mappedImageHeight);

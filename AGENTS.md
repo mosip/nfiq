@@ -36,7 +36,13 @@ with its own build/run/deploy story to warrant a split guide.
 - **Key libraries**: `jai-imageio-jpeg2000` (JPEG2000/JP2 decoding),
   `jnbis` (WSQ decoding), `io.mosip.kernel:kernel-bom` /
   `io.mosip.biometric.util:biometrics-util` (MOSIP kernel BOM and
-  biometrics utilities), Lombok, SLF4J + `slf4j-log4j12`
+  biometrics utilities), Lombok, SLF4J + `slf4j-log4j12`. **Log4j 1.x is
+  end-of-life with no planned vulnerability fixes** — this is a known
+  risk to track toward migrating to a supported logging backend
+  (e.g. Log4j 2 or Logback via SLF4J), not something to extend.
+  `nfiq1.0/src/main/resources/log4j.properties` currently configures
+  only console and rolling-file appenders — do not add remote, JMS, or
+  socket appenders, which carry known Log4j 1.x deserialization risks.
 - **Coverage**: JaCoCo (`jacoco-maven-plugin`)
 - **Static analysis**: SonarCloud, wired up via a Maven profile named
   `sonar` (see `nfiq1.0/pom.xml`, not active by default)
@@ -69,11 +75,22 @@ mvn test -Dtest=Nfiq1HelperTest
 ```
 
 Run the sample application after a build (from `nfiq1.0/target`, using the
-version currently in `pom.xml`, e.g. `0.1.1-SNAPSHOT` on `develop`):
+version currently in `pom.xml`, e.g. `0.1.1-SNAPSHOT` on `develop`). The
+classes are compiled with `--enable-preview`, so the same flag is required
+at runtime too:
+
+POSIX shell:
 
 ```bash
 cd target
-java -cp "nfiq1.0-0.1.1-SNAPSHOT.jar;lib\*;test-classes\" org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_jp2.iso" "logs=0"
+java --enable-preview -cp "nfiq1.0-0.1.1-SNAPSHOT.jar:lib/*:test-classes" \
+  org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_jp2.iso" "logs=0"
+```
+
+Windows (`cmd.exe`, matching `nfiq1.0/runJP2.bat`'s classpath syntax):
+
+```bat
+java --enable-preview -cp nfiq1.0-0.1.1-SNAPSHOT.jar;lib\*;test-classes org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_jp2.iso" "logs=0"
 ```
 
 The repo also ships `nfiq1.0/runJP2.bat` and `nfiq1.0/runWSQ.bat`, which run
@@ -140,12 +157,9 @@ matching test first.
 
 ## Development Workflow
 
-- GitHub reports `master` as this repo's default branch
-  (`gh repo view mosip/nfiq --json defaultBranchRef`), but active
-  day-to-day development happens on `develop` (it has more recent commits
-  and carries an in-progress `-SNAPSHOT` version in `nfiq1.0/pom.xml`, vs.
-  a released version on `master`). Branch from `develop` and target PRs at
-  `develop` unless an issue explicitly says otherwise.
+- Verify the current default/active branch yourself (see the command
+  under Agent rules below) rather than assuming `develop` or `master` —
+  do not rely on a hardcoded branch name here.
 - CI (`.github/workflows/push-trigger.yml`) triggers on: a published
   release, PRs (`opened`, `reopened`, `synchronize`) against any base
   branch, manual `workflow_dispatch`, and pushes to branches matching

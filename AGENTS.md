@@ -99,7 +99,11 @@ the same `NfiqApplication` test harness against the bundled sample ISO files
 `maven-resources-plugin` during the `validate` phase. These `.bat` files
 hardcode a jar version (currently `nfiq1.0-0.1.1-SNAPSHOT.jar`) — check it
 matches the version you actually built before running, and update it if
-`pom.xml`'s `<version>` has moved on.
+`pom.xml`'s `<version>` has moved on. Note that, as checked in, neither
+`.bat` file actually passes `--enable-preview` even though it's required at
+runtime (see above) — prefer the documented `--enable-preview` command
+above for local runs, since the bundled scripts as-is can fail if the code
+path you're exercising uses preview APIs.
 
 `NfiqApplication` expects two arguments: `imgfile` (path to an ISO file
 containing a JP2- or WSQ-compressed fingerprint) and `logs` (`0` for a
@@ -184,6 +188,12 @@ matching test first.
 
 ## Pull Request Guidelines
 
+- Verify the current default branch with `gh repo view mosip/nfiq --json
+  defaultBranchRef` before opening a PR — do not assume. As of this
+  writing GitHub reports `master` as the default, but `develop` is the
+  active integration branch that recent feature PRs target; open feature
+  PRs against `develop` unless you are specifically backporting to a
+  release branch.
 - Reference the tracking issue in the PR title/description (this repo's
   history uses `#<issue-number>: <summary>`-style commit/PR titles).
 - Sign off commits (`git commit -s`) — MOSIP repos expect a DCO
@@ -210,7 +220,9 @@ matching test first.
   `-jar`/`-cp` main-class argument, for example:
 
   ```bash
-  java -Dlog4j.configuration=file:log4j.properties -cp "nfiq1.0-0.1.1-SNAPSHOT.jar;lib\*;test-classes\" org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_jp2.iso" "logs=0"
+  java -Dlog4j.configuration=file:log4j.properties --enable-preview \
+    -cp "nfiq1.0-0.1.1-SNAPSHOT.jar:lib/*:test-classes" \
+    org.mosip.nist.nfiq1.test.NfiqApplication "imgfile=info_jp2.iso" "logs=0"
   ```
 
 - This is a library consumed by other MOSIP services (Biometric SDK,

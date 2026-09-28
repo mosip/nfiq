@@ -26,6 +26,7 @@ on:
       - 'master'
       - '1.*'
       - 'release*'
+      - 'issue*'
 
 jobs:
   # mvn -U package on the reactor (both modules, all tests). kattu only zips executable jars by

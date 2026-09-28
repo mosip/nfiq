@@ -6,13 +6,34 @@ import java.util.concurrent.atomic.AtomicIntegerArray;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.IMatchPattern;
 
+/**
+ * Pixel-pair pattern matching used by MINDTCT minutia detection.
+ * <p>
+ * Port of NIST LFS {@code matchpat.c}. While scanning adjacent rows (or
+ * columns) of the binarized image, MINDTCT compares consecutive pixel pairs
+ * against the first, second and third pairs of each entry in
+ * {@link Globals#getFeaturePatterns()} to detect candidate ridge endings and
+ * bifurcations. Also provides helpers that skip runs of repeated pixel pairs.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class MatchPattern extends MindTct implements IMatchPattern {
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static MatchPattern instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private MatchPattern() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code MatchPattern} instance
+	 */
 	public static synchronized MatchPattern getInstance() {
 		if (instance == null) {
 			synchronized (MatchPattern.class) {
@@ -24,19 +45,30 @@ public class MatchPattern extends MindTct implements IMatchPattern {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Globals} tables (feature patterns).
+	 *
+	 * @return the {@code Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: matchFirstPair - Determines which of the feature_patterns[] have their
-	 * #cat: first pixel pair match the specified pixel pair. Input: firstPixelValue
-	 * - first pixel value of pair secondPixelValue - second pixel value of pair
-	 * Output: oPossible - list of matching feature_patterns[] indices
-	 * oPossibleMatch - number of matches Return Code: oPossibleMatch - number of
-	 * matches
-	 *************************************************************************/
+	/**
+	 * Determines which of the feature patterns have their first pixel pair match
+	 * the specified pixel pair.
+	 * <p>
+	 * NIST: {@code match_1st_pair()}. Tests all {@link ILfs#NFEATURES} entries of
+	 * {@code feature_patterns[]}.
+	 *
+	 * @param firstPixelValue  first pixel value of pair
+	 * @param secondPixelValue second pixel value of pair
+	 * @param oPossible        output: list of matching feature pattern indices
+	 *                         (must hold at least {@link ILfs#NFEATURES} entries)
+	 * @param oPossibleMatch   output: reset to 0, then set to the number of
+	 *                         matches
+	 * @return the number of matches (same as {@code oPossibleMatch})
+	 */
 	public int matchFirstPair(int firstPixelValue, int secondPixelValue, AtomicIntegerArray oPossible,
 			AtomicInteger oPossibleMatch) {
 		/* Set possibilities to 0 */
@@ -58,16 +90,22 @@ public class MatchPattern extends MindTct implements IMatchPattern {
 		return (oPossibleMatch.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: matchSecondPair - Determines which of the passed feature_patterns[]
-	 * have #cat: their second pixel pair match the specified pixel pair. Input:
-	 * firstPixelValue - first pixel value of pair secondPixelValue - second pixel
-	 * value of pair oPossible - list of potentially-matching feature_patterns[]
-	 * indices oPossibleMatch - number of potential matches Output: oPossible - list
-	 * of matching feature_patterns[] indices oPossibleMatch - number of matches
-	 * Return Code: oPossibleMatch - number of matches
-	 *************************************************************************/
+	/**
+	 * Determines which of the passed feature patterns have their second pixel
+	 * pair match the specified pixel pair.
+	 * <p>
+	 * NIST: {@code match_2nd_pair()}. If both pixel values are equal the pair
+	 * cannot be a second feature pair, and zero matches are returned.
+	 *
+	 * @param firstPixelValue  first pixel value of pair
+	 * @param secondPixelValue second pixel value of pair
+	 * @param oPossible        input/output: on input the list of
+	 *                         potentially-matching feature pattern indices; on
+	 *                         output compacted to the list of matching indices
+	 * @param oPossibleMatch   input/output: on input the number of potential
+	 *                         matches; on output the number of matches
+	 * @return the number of matches (same as {@code oPossibleMatch})
+	 */
 	public int matchSecondPair(int firstPixelValue, int secondPixelValue, AtomicIntegerArray oPossible,
 			AtomicInteger oPossibleMatch) {
 		int currentPossibleMatches;
@@ -99,16 +137,21 @@ public class MatchPattern extends MindTct implements IMatchPattern {
 		return (oPossibleMatch.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: matchThirdPair - Determines which of the passed feature_patterns[] have
-	 * #cat: their third pixel pair match the specified pixel pair. Input:
-	 * firstPixelValue - first pixel value of pair secondPixelValue - second pixel
-	 * value of pair oPossible - list of potentially-matching feature_patterns[]
-	 * indices oPossibleMatch - number of potential matches Output: oPossible - list
-	 * of matching feature_patterns[] indices oPossibleMatch - number of matches
-	 * Return Code: oPossibleMatch - number of matches
-	 *************************************************************************/
+	/**
+	 * Determines which of the passed feature patterns have their third pixel pair
+	 * match the specified pixel pair.
+	 * <p>
+	 * NIST: {@code match_3rd_pair()}.
+	 *
+	 * @param firstPixelValue  first pixel value of pair
+	 * @param secondPixelValue second pixel value of pair
+	 * @param oPossible        input/output: on input the list of
+	 *                         potentially-matching feature pattern indices; on
+	 *                         output compacted to the list of matching indices
+	 * @param oPossibleMatch   input/output: on input the number of potential
+	 *                         matches; on output the number of matches
+	 * @return the number of matches (same as {@code oPossibleMatch})
+	 */
 	public int matchThirdPair(int firstPixelValue, int secondPixelValue, AtomicIntegerArray oPossible,
 			AtomicInteger oPossibleMatch) {
 		int currentPossibleMatches;
@@ -134,20 +177,28 @@ public class MatchPattern extends MindTct implements IMatchPattern {
 		return (oPossibleMatch.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: skipRepeatedHorizontalPair - Takes the location of two pixel in #cat:
-	 * adjacent pixel rows within an image region and skips #cat: rightward until
-	 * the either the pixel pair no longer repeats #cat: itself or the image region
-	 * is exhausted. Input: currentXPixelIndex - current x-coord of starting pixel
-	 * pair currentRightXPixelIndex - right edge of the image region
-	 * binarizedImageData - array of image currentTopPixel - pointer to current top
-	 * pixel in pair currentBottomPixel - pointer to current bottom pixel in pair
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image Output: currentXPixelIndex - x-coord of where rightward skip terminated
-	 * currentTopPixel - points to top pixel where rightward skip terminated
-	 * currentBottomPixel - points to bottom pixel where rightward skip terminated
-	 *************************************************************************/
+	/**
+	 * Takes the location of two pixels in adjacent pixel rows within an image
+	 * region and skips rightward until either the pixel pair no longer repeats
+	 * itself or the image region is exhausted.
+	 * <p>
+	 * NIST: {@code skip_repeated_horizontal_pair()}. Always advances at least one
+	 * pixel.
+	 *
+	 * @param currentXPixelIndex      input/output: current x-coord of starting
+	 *                                pixel pair; on return the x-coord where the
+	 *                                rightward skip terminated
+	 * @param currentRightXPixelIndex right edge (exclusive) of the image region
+	 * @param binarizedImageData      binarized image pixel data (row-major)
+	 * @param currentTopPixel         input/output: index of current top pixel in
+	 *                                pair; on return the top pixel where the skip
+	 *                                terminated
+	 * @param currentBottomPixel      input/output: index of current bottom pixel
+	 *                                in pair; on return the bottom pixel where the
+	 *                                skip terminated
+	 * @param imageWidth              width (in pixels) of image (unused)
+	 * @param imageHeight             height (in pixels) of image (unused)
+	 */
 	public void skipRepeatedHorizontalPair(AtomicInteger currentXPixelIndex, final int currentRightXPixelIndex,
 			int[] binarizedImageData, AtomicInteger currentTopPixel, AtomicInteger currentBottomPixel,
 			final int imageWidth, final int imageHeight) {
@@ -179,20 +230,28 @@ public class MatchPattern extends MindTct implements IMatchPattern {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: skipRepeatedVerticalPair - Takes the location of two pixel in #cat:
-	 * adjacent pixel columns within an image region and skips #cat: downward until
-	 * the either the pixel pair no longer repeats #cat: itself or the image region
-	 * is exhausted. Input: currentYPixelIndex - current y-coord of starting pixel
-	 * pair currentBottomYPixelIndex - bottom of the image region binarizedImageData
-	 * - array of image currentLeftPixel - pointer to current left pixel in pair
-	 * currentRightPixel - pointer to current right pixel in pair imageWidth - width
-	 * (in pixels) of image imageHeight - height (in pixels) of image Output:
-	 * currentYPixelIndex - y-coord of where downward skip terminated
-	 * currentLeftPixel - points to left pixel where downward skip terminated
-	 * currentRightPixel - points to right pixel where donward skip terminated
-	 *************************************************************************/
+	/**
+	 * Takes the location of two pixels in adjacent pixel columns within an image
+	 * region and skips downward until either the pixel pair no longer repeats
+	 * itself or the image region is exhausted.
+	 * <p>
+	 * NIST: {@code skip_repeated_vertical_pair()}. Always advances at least one
+	 * row.
+	 *
+	 * @param currentYPixelIndex       input/output: current y-coord of starting
+	 *                                 pixel pair; on return the y-coord where the
+	 *                                 downward skip terminated
+	 * @param currentBottomYPixelIndex bottom (exclusive) of the image region
+	 * @param binarizedImageData       binarized image pixel data (row-major)
+	 * @param currentLeftPixel         input/output: index of current left pixel in
+	 *                                 pair; on return the left pixel where the
+	 *                                 skip terminated
+	 * @param currentRightPixel        input/output: index of current right pixel
+	 *                                 in pair; on return the right pixel where the
+	 *                                 skip terminated
+	 * @param imageWidth               width (in pixels) of image (row stride)
+	 * @param imageHeight              height (in pixels) of image (unused)
+	 */
 	public void skipRepeatedVerticalPair(AtomicInteger currentYPixelIndex, final int currentBottomYPixelIndex,
 			int[] binarizedImageData, AtomicInteger currentLeftPixel, AtomicInteger currentRightPixel,
 			final int imageWidth, final int imageHeight) {

@@ -15,24 +15,100 @@ import org.mosip.nist.nfiq1.common.ILfs.RotGrids;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Block-level image maps for the MINDTCT minutiae detector (Direction, Low Contrast, Low Flow,
+ * High Curvature, IMAP and NMAP).
+ *
+ * This class is the Java port of NIST's {@code maps.c} from the LFS (Latent Fingerprint System)
+ * library used by MINDTCT / NFIQ 1.0. The fingerprint image is partitioned into blocks and,
+ * using DFT-based analysis of rotated pixel grids ({@link Dft}), each block is assigned:
+ * <ul>
+ * <li>a <b>Direction Map</b> value: the dominant ridge-flow direction as an integer on the range
+ * {@code [0..nDirs)}, or {@link ILfs#INVALID_DIR} ({@code -1}) when none could be determined;</li>
+ * <li>a <b>Low Contrast Map</b> flag: {@link ILfs#TRUE} when the block has insufficient
+ * contrast (typically background);</li>
+ * <li>a <b>Low Flow Map</b> flag: {@link ILfs#TRUE} when no significant ridge flow was found;</li>
+ * <li>a <b>High Curvature Map</b> flag: {@link ILfs#TRUE} when the block lies in an area of high
+ * curvature (such as cores and deltas).</li>
+ * </ul>
+ * {@link #genImageMaps} (LFS version 2) produces these four maps and stores them in this
+ * object's fields. The version-1 routines {@link #generateInputBlockImageMap} (IMAP) and
+ * {@link #genNMap} (NMAP) are also provided. The maps are later used to drive minutia detection
+ * and to assign minutia reliability, and ultimately feed the NFIQ quality features.
+ *
+ * All maps are stored row-major as {@link AtomicIntegerArray}s of
+ * {@code mappedImageWidth * mappedImageHeight} entries (block index
+ * {@code = y * mappedImageWidth + x}).
+ *
+ * The class is a lazily created singleton ({@link #getInstance()} and overloads). Unlike most
+ * MINDTCT helpers it carries mutable per-image state (the generated maps and their block
+ * dimensions), and several methods read the block dimensions from that state rather than from
+ * parameters. The singleton accessors are {@code synchronized}, but the instance itself is not
+ * thread-safe: concurrent map generation for different images on the same instance will
+ * interfere, so callers must serialize access externally.
+ */
 public class Maps extends MindTct implements IMaps {
+	/**
+	 * SLF4J logger for this class; used for error messages and, when {@code isShowLogs()} is
+	 * enabled, detailed per-block trace output.
+	 */
 	private static final Logger logger = LoggerFactory.getLogger(Maps.class);
+	/**
+	 * Lazily created singleton instance, returned by the {@code getInstance} methods and cleared by
+	 * {@link #resetInstance()}; guarded by the class monitor.
+	 */
 	private static Maps instance;
+	/**
+	 * Direction Map: per-block dominant ridge-flow direction on the range {@code [0..nDirs)}, or
+	 * {@link ILfs#INVALID_DIR} ({@code -1}) where no reliable direction exists. Row-major, one entry
+	 * per block.
+	 */
 	private AtomicIntegerArray directionMap;
+	/**
+	 * Low Contrast Map: per-block flag, {@link ILfs#TRUE} ({@code 1}) for blocks with insufficient
+	 * contrast, {@link ILfs#FALSE} ({@code 0}) otherwise. Row-major, one entry per block.
+	 */
 	private AtomicIntegerArray lowContrastMap;
+	/**
+	 * Low Ridge Flow Map: per-block flag, {@link ILfs#TRUE} ({@code 1}) for blocks in which DFT
+	 * analysis found no significant ridge flow, {@link ILfs#FALSE} ({@code 0}) otherwise. Row-major,
+	 * one entry per block.
+	 */
 	private AtomicIntegerArray lowFlowMap;
+	/**
+	 * High Curvature Map: per-block flag, {@link ILfs#TRUE} ({@code 1}) for blocks with high
+	 * curvature (vorticity or direction change above threshold), {@link ILfs#FALSE} ({@code 0})
+	 * otherwise. Row-major, one entry per block.
+	 */
 	private AtomicIntegerArray highCurveMap;
-	// mappedImageWidth - number of blocks horizontally in the padded input image
-	// mappedImageHeight - number of blocks vertically in the padded input image
+	/**
+	 * Number of blocks horizontally in the (padded) input image, i.e. the width of the maps in
+	 * blocks.
+	 */
 	private AtomicInteger mappedImageWidth;
+	/**
+	 * Number of blocks vertically in the (padded) input image, i.e. the height of the maps in
+	 * blocks.
+	 */
 	private AtomicInteger mappedImageHeight;
 
+	/**
+	 * Creates an empty instance with block dimensions of zero and no maps allocated. Private to
+	 * enforce the singleton pattern; use {@link #getInstance()}.
+	 */
 	private Maps() {
 		super();
 		setMappedImageWidth(new AtomicInteger(0));
 		setMappedImageHeight(new AtomicInteger(0));
 	}
 
+	/**
+	 * Creates an instance with the given block dimensions and allocates all four maps
+	 * ({@code mappedImageWidth * mappedImageHeight} entries each, initialized to zero).
+	 *
+	 * @param mappedImageWidth  width of the maps, in blocks
+	 * @param mappedImageHeight height of the maps, in blocks
+	 */
 	private Maps(int mappedImageWidth, int mappedImageHeight) {
 		super();
 		this.mappedImageWidth = new AtomicInteger(mappedImageWidth);
@@ -46,6 +122,15 @@ public class Maps extends MindTct implements IMaps {
 		highCurveMap = new AtomicIntegerArray(mapSize);
 	}
 
+	/**
+	 * Creates an instance wrapping existing maps. The block dimensions are left unset
+	 * ({@code null}) and must be assigned with the setters before calling methods that rely on them.
+	 *
+	 * @param directionMap   the Direction Map
+	 * @param lowContrastMap the Low Contrast Map
+	 * @param lowFlowMap     the Low Ridge Flow Map
+	 * @param highCurveMap   the High Curvature Map
+	 */
 	private Maps(AtomicIntegerArray directionMap, AtomicIntegerArray lowContrastMap, AtomicIntegerArray lowFlowMap,
 			AtomicIntegerArray highCurveMap) {
 		super();
@@ -55,6 +140,11 @@ public class Maps extends MindTct implements IMaps {
 		this.highCurveMap = highCurveMap;
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating an empty one on first use.
+	 *
+	 * @return the singleton {@code Maps} instance, never {@code null}
+	 */
 	public static synchronized Maps getInstance() {
 		if (instance == null) {
 			instance = new Maps();
@@ -62,10 +152,23 @@ public class Maps extends MindTct implements IMaps {
 		return instance;
 	}
 
+	/**
+	 * Discards the current singleton so that the next {@code getInstance} call creates a fresh
+	 * instance. Package-private; intended mainly for tests.
+	 */
 	static synchronized void resetInstance() {
 		instance = null;
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it with the given block dimensions (and
+	 * freshly allocated maps) if it does not exist yet. If the singleton already exists, the
+	 * arguments are ignored.
+	 *
+	 * @param mappedImageWidth  width of the maps, in blocks (used only on first creation)
+	 * @param mappedImageHeight height of the maps, in blocks (used only on first creation)
+	 * @return the singleton {@code Maps} instance, never {@code null}
+	 */
 	public static synchronized Maps getInstance(int mappedImageWidth, int mappedImageHeight) {
 		if (instance == null) {
 			instance = new Maps(mappedImageWidth, mappedImageHeight);
@@ -73,6 +176,16 @@ public class Maps extends MindTct implements IMaps {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it around the given maps if it does not
+	 * exist yet. If the singleton already exists, the arguments are ignored.
+	 *
+	 * @param directionMap   the Direction Map (used only on first creation)
+	 * @param lowContrastMap the Low Contrast Map (used only on first creation)
+	 * @param lowFlowMap     the Low Ridge Flow Map (used only on first creation)
+	 * @param highCurveMap   the High Curvature Map (used only on first creation)
+	 * @return the singleton {@code Maps} instance, never {@code null}
+	 */
 	public static synchronized Maps getInstance(AtomicIntegerArray directionMap, AtomicIntegerArray lowContrastMap,
 			AtomicIntegerArray lowFlowMap, AtomicIntegerArray highCurveMap) {
 		if (instance == null) {
@@ -81,58 +194,111 @@ public class Maps extends MindTct implements IMaps {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper providing numeric utilities (rounding, precision
+	 * truncation, floating-point modulo) matching NIST's {@code defs.h} macros.
+	 *
+	 * @return the {@link Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Block} helper (NIST {@code block.c}) used to compute block offsets,
+	 * test low-contrast blocks, find valid neighbor blocks and set margin blocks.
+	 *
+	 * @return the {@link Block} singleton
+	 */
 	public Block getBlock() {
 		return Block.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Init} helper (NIST {@code init.c}) used to allocate DFT power and
+	 * power-statistic arrays.
+	 *
+	 * @return the {@link Init} singleton
+	 */
 	public Init getInit() {
 		return Init.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper, the Java counterpart of NIST's {@code free.c}
+	 * deallocation routines (largely no-ops under garbage collection, kept for parity).
+	 *
+	 * @return the {@link Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Dft} helper (NIST {@code dft.c}) used to compute directional DFT
+	 * powers and power statistics for each block.
+	 *
+	 * @return the {@link Dft} singleton
+	 */
 	public Dft getDft() {
 		return Dft.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link LfsUtil} helper (NIST {@code util.c}), used here for the closest
+	 * direction distance between two integer directions.
+	 *
+	 * @return the {@link LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Morph} helper (NIST {@code morph.c}) providing binary dilation and
+	 * erosion used to morph TRUE/FALSE maps.
+	 *
+	 * @return the {@link Morph} singleton
+	 */
 	public Morph getMorph() {
 		return Morph.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: genImageMaps - Computes a set of image maps based on Version 2 #cat: of
-	 * the NIST LFS System. The first map is a Direction Map #cat: which is a 2D
-	 * vector of integer directions, where each #cat: direction represents the
-	 * dominant ridge flow in a block of #cat: the input grayscale image. The Low
-	 * Contrast Map flags #cat: blocks with insufficient contrast. The Low Flow Map
-	 * flags #cat: blocks with insufficient ridge flow. The High Curve Map #cat:
-	 * flags blocks containing high curvature. This routine will #cat: generate maps
-	 * for an arbitrarily sized, non-square, image. Input: paddedImagedata - padded
-	 * input image data (8 bits [0..256) grayscale) paddedImageWidth - padded width
-	 * (in pixels) of the input image paddedImageHeight - padded height (in pixels)
-	 * of the input image dirToRad - lookup table for converting integer directions
-	 * dftWaves - structure containing the DFT wave forms dftGrids - structure
-	 * containing the rotated pixel grid offsets lfsParams - parameters and
-	 * thresholds for controlling LFS Output: //oDirectionMap - points to the
-	 * created Direction Map(Take from Map Object Get Method) //oLowContrastMap -
-	 * points to the created Low Contrast Map(Take from Map Object Get Method)
-	 * //oLowFlowMap - points to the Low Ridge Flow Map(Take from Map Object Get
-	 * Method) //oHighCurvatureMap - points to the High Curvature Map(Take from Map
-	 * Object Get Method) //omw - width (in blocks) of the maps(Take from Get Map
-	 * Object Method) //omh - height (in blocks) of the maps (Take from Map Object
-	 * Get Method) Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Computes the Direction, Low Contrast, Low Flow and High Curvature maps for an image, based on
+	 * Version 2 of the NIST LFS system.
+	 *
+	 * Port of NIST {@code gen_image_maps()}. Works for arbitrarily sized, non-square images. Steps:
+	 * <ol>
+	 * <li>Compute block offsets for the unpadded image (the DFT grids must be square).</li>
+	 * <li>Generate the initial Direction, Low Contrast and Low Flow maps
+	 * ({@link #initialiseMaps}), then morph the Low Flow Map ({@link #morphMapWithTF}).</li>
+	 * <li>Remove inconsistent directions ({@link #removeInconsistentDirs}).</li>
+	 * <li>Smooth directions with their neighbors ({@link #smoothDirectionMap}).</li>
+	 * <li>Interpolate INVALID blocks from valid neighbors ({@link #interpolateDirectionMap}).</li>
+	 * <li>Remove inconsistent directions again.</li>
+	 * <li>Smooth directions again.</li>
+	 * <li>Set the Direction Map in the image margin to {@link ILfs#INVALID_DIR}.</li>
+	 * <li>Generate the High Curvature Map ({@link #generateHighCurveMap}).</li>
+	 * </ol>
+	 * Unlike the C original, which returns the maps through output pointers, the results are stored
+	 * in this instance and must be read back with {@link #getDirectionMap()},
+	 * {@link #getLowContrastMap()}, {@link #getLowFlowMap()}, {@link #getHighCurveMap()},
+	 * {@link #getMappedImageWidth()} and {@link #getMappedImageHeight()} (map dimensions in blocks).
+	 *
+	 * @param paddedImagedata   padded input image data (8-bit grayscale, values [0..256)),
+	 *                          row-major
+	 * @param paddedImageWidth  width of the padded input image, in pixels
+	 * @param paddedImageHeight height of the padded input image, in pixels
+	 * @param dirToRad          lookup table for converting integer directions to radians
+	 *                          (cosine/sine components)
+	 * @param dftWaves          structure containing the DFT wave forms
+	 * @param dftGrids          structure containing the rotated pixel grid offsets and pad size
+	 * @param lfsParams         LFS parameters and thresholds
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion;
+	 *         {@link ILfs#ERROR_CODE_540} ({@code -540}) if the DFT grids are not square; another
+	 *         negative system error code propagated from a sub-step otherwise
+	 */
 	public int genImageMaps(int[] paddedImagedata, final int paddedImageWidth, final int paddedImageHeight,
 			DirToRad dirToRad, DftWaves dftWaves, RotGrids dftGrids, LfsParams lfsParams) {
 		AtomicInteger mappedImageWidth = new AtomicInteger(0);
@@ -242,34 +408,42 @@ public class Maps extends MindTct implements IMaps {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: initialiseMaps - Creates an initial Direction Map from the given #cat:
-	 * input image. It very important that the image be properly #cat: padded so
-	 * that rotated grids along the boundary of the image #cat: do not access unkown
-	 * memory. The rotated grids are used by a #cat: DFT-based analysis to determine
-	 * the integer directions #cat: in the map. Typically this initial vector of
-	 * directions will #cat: subsequently have weak or inconsistent directions
-	 * removed #cat: followed by a smoothing process. The resulting Direction #cat:
-	 * Map contains valid directions >= 0 and INVALID values = -1. #cat: This
-	 * routine also computes and returns 2 other image maps. #cat: The Low Contrast
-	 * Map flags blocks in the image with #cat: insufficient contrast. Blocks with
-	 * low contrast have a #cat: corresponding direction of INVALID in the Direction
-	 * Map. #cat: The Low Flow Map flags blocks in which the DFT analyses #cat:
-	 * could not determine a significant ridge flow. Blocks with #cat: low ridge
-	 * flow also have a corresponding direction of #cat: INVALID in the Direction
-	 * Map. Input: blockOffsets - offsets to the pixel origin of each block in the
-	 * padded image mappedImageWidth - number of blocks horizontally in the padded
-	 * input image mappedImageHeight - number of blocks vertically in the padded
-	 * input image paddedImagedata - padded input image data (8 bits [0..256)
-	 * grayscale) paddedImageWidth - width (in pixels) of the padded input image
-	 * paddedImageHeight - height (in pixels) of the padded input image dftWaves -
-	 * structure containing the DFT wave forms dftGrids - structure containing the
-	 * rotated pixel grid offsets lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oDirectionMap - points to the newly created Direction
-	 * Map oLowContrastMap - points to the newly created Low Contrast Map Return
-	 * Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Creates the initial Direction Map, Low Contrast Map and Low Flow Map from the padded input
+	 * image.
+	 *
+	 * Port of NIST {@code gen_initial_maps()}. It is very important that the image be properly padded
+	 * so that rotated grids along the image boundary do not access unknown memory. For each block,
+	 * a window around it (clamped to stay out of the padded border) is first tested for low
+	 * contrast; low-contrast blocks are flagged in the Low Contrast Map and keep an INVALID
+	 * direction. Otherwise, DFT directional powers and power statistics are computed (skipping the
+	 * first DFT wave) and the {@link #primaryDirectionTest} is applied, falling back to the
+	 * {@link #secondaryForkTest}. If neither yields a direction, the block is flagged in the Low
+	 * Flow Map and its direction stays {@link ILfs#INVALID_DIR}. Typically this initial map will
+	 * subsequently have weak or inconsistent directions removed, followed by smoothing.
+	 *
+	 * The resulting Direction Map contains valid directions {@code >= 0} and INVALID values
+	 * {@code = -1}.
+	 *
+	 * @param oDirectionMap     output Direction Map (pre-allocated, one entry per block); reset to
+	 *                          {@link ILfs#INVALID_DIR} and then filled in place
+	 * @param oLowContrastMap   output Low Contrast Map (pre-allocated); reset to {@link ILfs#FALSE}
+	 *                          and then filled in place
+	 * @param oLowFlowMap       output Low Ridge Flow Map (pre-allocated); reset to
+	 *                          {@link ILfs#FALSE} and then filled in place
+	 * @param blockOffsets      offsets to the pixel origin of each block in the padded image
+	 * @param mappedImageWidth  number of blocks horizontally in the padded input image
+	 * @param mappedImageHeight number of blocks vertically in the padded input image
+	 * @param paddedImagedata   padded input image data (8-bit grayscale, values [0..256)),
+	 *                          row-major
+	 * @param paddedImageWidth  width of the padded input image, in pixels
+	 * @param paddedImageHeight height of the padded input image, in pixels
+	 * @param dftWaves          structure containing the DFT wave forms
+	 * @param dftGrids          structure containing the rotated pixel grid offsets
+	 * @param lfsParams         LFS parameters and thresholds (window size/offset, DFT thresholds)
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion; a negative system error code
+	 *         otherwise (the partially filled maps should then be discarded)
+	 */
 	public int initialiseMaps(AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowContrastMap,
 			AtomicIntegerArray oLowFlowMap, AtomicIntegerArray blockOffsets, final int mappedImageWidth,
 			final int mappedImageHeight, int[] paddedImagedata, final int paddedImageWidth, final int paddedImageHeight,
@@ -294,7 +468,7 @@ public class Maps extends MindTct implements IMaps {
 		int lowContrastOffset;
 
 		if (isShowLogs())
-			logger.info("INITIAL MAP");
+			logger.debug("INITIAL MAP");
 
 		/* Compute total number of blocks in map */
 		bSize = mappedImageWidth * mappedImageHeight;
@@ -357,7 +531,7 @@ public class Maps extends MindTct implements IMaps {
 			lowContrastOffset = (winY * paddedImageWidth) + winX;
 
 			if (isShowLogs())
-				logger.info("   MAP BLOCK {} ({}, {}) ", bi, bi % mappedImageWidth,
+				logger.debug("   MAP BLOCK {} ({}, {}) ", bi, bi % mappedImageWidth,
 						bi / mappedImageWidth);
 
 			/* If block is low contrast ... */
@@ -379,14 +553,14 @@ public class Maps extends MindTct implements IMaps {
 
 				/* Otherwise, block is low contrast ... */
 				if (isShowLogs())
-					logger.info("LOW CONTRAST");
+					logger.debug("LOW CONTRAST");
 				oLowContrastMap.set(bi, ILfs.TRUE);// = 1 = true
 				/* Direction Map's block is already set to INVALID. */
 			}
 			/* Otherwise, sufficient contrast for DFT processing ... */
 			else {
 				if (isShowLogs())
-					logger.info("");
+					logger.debug("");
 				/* Compute DFT powers */
 				ret.set(getDft().dftDirPowers(powers, paddedImagedata, lowContrastOffset, paddedImageWidth,
 						paddedImageHeight, dftWaves, dftGrids));
@@ -423,10 +597,10 @@ public class Maps extends MindTct implements IMaps {
 
 				if (isShowLogs()) {
 					int _w;
-					logger.info("      Power");
+					logger.debug("      Power");
 					for (_w = 0; _w < nStats; _w++) {
 						/* Add 1 to wis[w] to create index to original dft_coefs[] */
-						logger.info("         wis[{}] {} {} {} {} {}", _w, wis.get(_w) + 1,
+						logger.debug("         wis[{}] {} {} {} {} {}", _w, wis.get(_w) + 1,
 								powmaxs.get(wis.get(_w)), powmaxDirs.get(wis.get(_w)), pownorms.get(wis.get(_w)),
 								powers.get(0)[powmaxDirs.get(wis.get(_w))]);
 					}
@@ -461,23 +635,27 @@ public class Maps extends MindTct implements IMaps {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: interpolateDirectionMap - Take a Direction Map and Low Contrast #cat:
-	 * Map and attempts to fill in INVALID directions in the #cat: Direction Map
-	 * based on a blocks valid neighbors. The #cat: valid neighboring directions are
-	 * combined in a weighted #cat: average inversely proportional to their distance
-	 * from #cat: the block being interpolated. Low Contrast blocks are #cat: used
-	 * to prempt the search for a valid neighbor in a #cat: specific direction,
-	 * which keeps the process from #cat: interpolating directions for blocks in the
-	 * background and #cat: and perimeter of the fingerprint in the image. Input:
-	 * oDirectionMap - map of blocks containing directional ridge flow
-	 * oLowContrastMap - map of blocks flagged as LOW CONTRAST mappedImageWidth -
-	 * number of blocks horizontally in the maps mappedImageHeight - number of
-	 * blocks vertically in the maps lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oDirectionMap - contains the newly interpolated
-	 * results Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Fills in INVALID directions in the Direction Map from each block's valid neighbors.
+	 *
+	 * Port of NIST {@code interpolate_direction_map()}. For every block that is not LOW CONTRAST
+	 * and has an INVALID direction, the nearest valid block is searched for in each of the four
+	 * compass directions ({@link Block#findValidBlock}); low-contrast blocks stop the search, which
+	 * keeps the process from interpolating directions in the background and along the perimeter of
+	 * the fingerprint. If at least {@link LfsParams#getMinInterpolateNbrs()} neighbors are found,
+	 * their directions are combined in a weighted average inversely related to their distance
+	 * (in blocks) from the block, truncated to {@link ILfs#TRUNC_SCALE} precision for
+	 * cross-platform consistency and rounded. Results are computed into a working map and then
+	 * copied back, so interpolation uses only the original values.
+	 *
+	 * @param oDirectionMap     Direction Map; updated in place with the interpolated results
+	 * @param oLowContrastMap   Low Contrast Map of blocks flagged as LOW CONTRAST
+	 * @param mappedImageWidth  number of blocks horizontally in the maps
+	 * @param mappedImageHeight number of blocks vertically in the maps
+	 * @param lfsParams         LFS parameters and thresholds
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion (no error path exists in this
+	 *         implementation)
+	 */
 	public int interpolateDirectionMap(AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowContrastMap,
 			final int mappedImageWidth, final int mappedImageHeight, final LfsParams lfsParams) {
 		int newDir;
@@ -509,7 +687,7 @@ public class Maps extends MindTct implements IMaps {
 		double avrDir;
 
 		if (isShowLogs())
-			logger.info("INTERPOLATE DIRECTION MAP STARTED");
+			logger.debug("INTERPOLATE DIRECTION MAP STARTED");
 
 		/* Allocate output (interpolated) Direction Map. */
 		oMap = new AtomicIntegerArray(mappedImageWidth * mappedImageHeight);
@@ -621,7 +799,7 @@ public class Maps extends MindTct implements IMaps {
 						newDir = getDefs().sRound(avrDir);
 
 						if (isShowLogs())
-							logger.info("Block {},{} INTERP numnbs={} newdir={}", x, y, totalFound, newDir);
+							logger.debug("Block {},{} INTERP numnbs={} newdir={}", x, y, totalFound, newDir);
 
 						oMap.set(mptrIndex, newDir);
 					} else {
@@ -648,18 +826,23 @@ public class Maps extends MindTct implements IMaps {
 		getFree().free(oMap);
 
 		if (isShowLogs())
-			logger.info("INTERPOLATE DIRECTION MAP ENDED");
+			logger.debug("INTERPOLATE DIRECTION MAP ENDED");
 		/* Return normally. */
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: morphMapWithTF - Takes a 2D vector of TRUE and FALSE values integers
-	 * #cat: and dialates and erodes the map in an attempt to fill #cat: in voids in
-	 * the map. Input: tfMap - vector of integer block values lfsParams - parameters
-	 * and thresholds for controlling LFS Output: tfMap - resulting morphed map
-	 **************************************************************************/
+	/**
+	 * Dilates and erodes a TRUE/FALSE block map in an attempt to fill voids in it.
+	 *
+	 * Port of NIST {@code morph_TF_map()}. The map is copied into a working binary image, dilated
+	 * twice and then eroded twice ({@link Morph#dilateImage2}, {@link Morph#erodeImage2}), and the
+	 * result is copied back. The map dimensions are taken from this instance's
+	 * {@link #getMappedImageWidth()} and {@link #getMappedImageHeight()}.
+	 *
+	 * @param tfMap     TRUE/FALSE map of block values; replaced in place by the morphed map
+	 * @param lfsParams LFS parameters and thresholds (unused, kept for parity with NIST)
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion
+	 */
 	public int morphMapWithTF(AtomicIntegerArray tfMap, final LfsParams lfsParams) {
 		int[] cimage;
 		int[] mimage;
@@ -670,7 +853,7 @@ public class Maps extends MindTct implements IMaps {
 		final int mappedImageHeight = getMappedImageHeight().get();
 
 		if (isShowLogs())
-			logger.info("morphMapWithTF Started ({}, {})", mappedImageWidth, mappedImageHeight);
+			logger.debug("morphMapWithTF Started ({}, {})", mappedImageWidth, mappedImageHeight);
 		/* Convert TRUE/FALSE map into a binary byte image. */
 		int mSize = mappedImageWidth * mappedImageHeight;
 		cimage = new int[mSize];
@@ -699,18 +882,26 @@ public class Maps extends MindTct implements IMaps {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: pixelizeMap - Takes a block image map and assigns each pixel in the
-	 * #cat: image its corresponding block value. This allows block #cat: values in
-	 * maps to be directly accessed via pixel addresses. Input: oMap - points to the
-	 * resulting pixelized map imageWidth - the width (in pixels) of the
-	 * corresponding image imageHeight - the height (in pixels) of the corresponding
-	 * image inputBlockImageMap - input block image map mapWidth - the width (in
-	 * blocks) of the map mapHeight - the height (in blocks) of the map blockSize -
-	 * the dimension (in pixels) of each block Output: ret - value Return Code: ret
-	 * - Zero - successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Expands a block map to pixel resolution, assigning each pixel its block's value.
+	 *
+	 * Port of NIST {@code pixelize_map()}. This allows block values in maps to be directly accessed
+	 * via pixel addresses. Block offsets are computed for an unpadded image of the given size with
+	 * the given block size; they must yield exactly {@code mapWidth x mapHeight} blocks.
+	 *
+	 * @param oMap               output pixelized map; must be pre-allocated by the caller with
+	 *                           {@code imageWidth * imageHeight} entries, and is filled in place
+	 * @param imageWidth         width of the corresponding image, in pixels
+	 * @param imageHeight        height of the corresponding image, in pixels
+	 * @param inputBlockImageMap input block map (one entry per block)
+	 * @param mapWidth           width of the block map, in blocks
+	 * @param mapHeight          height of the block map, in blocks
+	 * @param blockSize          dimension of each (square) block, in pixels
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion;
+	 *         {@link ILfs#ERROR_CODE_591} ({@code -591}) if the computed block dimensions do not
+	 *         match {@code mapWidth}/{@code mapHeight}; another negative system error code from
+	 *         block offset computation otherwise
+	 */
 	public int pixelizeMap(AtomicIntegerArray oMap, int imageWidth, int imageHeight,
 			AtomicIntegerArray inputBlockImageMap, final int mapWidth, final int mapHeight, final int blockSize) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -757,16 +948,26 @@ public class Maps extends MindTct implements IMaps {
 		return ret.get();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: smoothDirectionMap - Takes a vector of integer directions and smooths
-	 * #cat: them by analyzing the direction of adjacent neighbors. Input:
-	 * oDirectionMap - vector of integer block values oLowContrastMap - vector of
-	 * integer block values //mappedImageWidth - width (in blocks) of the map
-	 * //mappedImageHeight - height (in blocks) of the map dirToRad - lookup table
-	 * for converting integer directions lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oDirectionMap - vector of smoothed input values
-	 **************************************************************************/
+	/**
+	 * Smooths the Direction Map by analyzing the directions of each block's 8 neighbors.
+	 *
+	 * Port of NIST {@code smooth_direction_map()}. For every block that is not LOW CONTRAST, the
+	 * average neighbor direction, its strength and the number of valid neighbors are computed
+	 * ({@link #average8NbrDir}). If the strength is at least
+	 * {@link LfsParams#getDirStrengthMin()} (e.g. 0.2), then a valid block is replaced by the
+	 * average when it has at least {@link LfsParams#getRmvValidNbrMin()} (e.g. 3) valid neighbors,
+	 * and an INVALID block is assigned the average when it has at least
+	 * {@link LfsParams#getSmoothValidNbrMin()} (e.g. 7) valid neighbors. Updates are applied in
+	 * place in raster order, so later blocks see already-smoothed neighbors, as in NIST.
+	 *
+	 * The map dimensions are taken from this instance's {@link #getMappedImageWidth()} and
+	 * {@link #getMappedImageHeight()}.
+	 *
+	 * @param oDirectionMap   Direction Map; smoothed in place
+	 * @param oLowContrastMap Low Contrast Map; LOW CONTRAST blocks are left unchanged
+	 * @param dirToRad        lookup table for converting integer directions to radians
+	 * @param lfsParams       LFS parameters and thresholds
+	 */
 	public void smoothDirectionMap(AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowContrastMap,
 			final DirToRad dirToRad, final LfsParams lfsParams) {
 		AtomicInteger oAverageDir = new AtomicInteger(0);
@@ -774,7 +975,7 @@ public class Maps extends MindTct implements IMaps {
 		AtomicReference<Double> oDirectionStrength = new AtomicReference<>();
 
 		if (isShowLogs())
-			logger.info("SMOOTH DIRECTION MAP");
+			logger.debug("SMOOTH DIRECTION MAP");
 		final int mappedImageWidth = getMappedImageWidth().get();
 		final int mappedImageHeight = getMappedImageHeight().get();
 		/* Assign pointers to beginning of both maps. */
@@ -800,15 +1001,15 @@ public class Maps extends MindTct implements IMaps {
 							/* Conduct valid neighbor test (Ex. thresh==3)... */
 							if (oValid.get() >= lfsParams.getRmvValidNbrMin()) {
 								if (isShowLogs()) {
-									logger.info("   SMOOTH DIRECTION BLOCK {} ({}, {})",
+									logger.debug("   SMOOTH DIRECTION BLOCK {} ({}, {})",
 											mappedXIndex + (mappedYIndex * mappedImageWidth), mappedXIndex,
 											mappedYIndex);
-									logger.info("      Average NBR :   {} {} {}", oAverageDir.get(),
+									logger.debug("      Average NBR :   {} {} {}", oAverageDir.get(),
 											oDirectionStrength.get(), oValid.get());
-									logger.info("      1. Valid NBR ({} >= {})", oValid.get(),
+									logger.debug("      1. Valid NBR ({} >= {})", oValid.get(),
 											lfsParams.getRmvValidNbrMin());
-									logger.info("      Valid Direction = {}", oDirectionMap.get(directionMapIndex));
-									logger.info("      Smoothed Direction = {}", oAverageDir.get());
+									logger.debug("      Valid Direction = {}", oDirectionMap.get(directionMapIndex));
+									logger.debug("      Smoothed Direction = {}", oAverageDir.get());
 								}
 								/* Reassign valid direction with average direction. */
 								oDirectionMap.set(directionMapIndex, oAverageDir.get());
@@ -820,15 +1021,15 @@ public class Maps extends MindTct implements IMaps {
 							/* valid neighbors is big enough (Ex. thresh==7)... */
 							if (oValid.get() >= lfsParams.getSmoothValidNbrMin()) {
 								if (isShowLogs()) {
-									logger.info("   SMOOTH DIRECTION BLOCK {} ({}, {})",
+									logger.debug("   SMOOTH DIRECTION BLOCK {} ({}, {})",
 											mappedXIndex + (mappedYIndex * mappedImageWidth), mappedXIndex,
 											mappedYIndex);
-									logger.info("      Average NBR :   {} {} {}", oAverageDir.get(),
+									logger.debug("      Average NBR :   {} {} {}", oAverageDir.get(),
 											oDirectionStrength.get(), oValid.get());
-									logger.info("      2. Invalid NBR ({} >= {})", oValid.get(),
+									logger.debug("      2. Invalid NBR ({} >= {})", oValid.get(),
 											lfsParams.getSmoothValidNbrMin());
-									logger.info("      Invalid Direction = {}", oDirectionMap.get(directionMapIndex));
-									logger.info("      Smoothed Direction = {}", oAverageDir.get());
+									logger.debug("      Invalid Direction = {}", oDirectionMap.get(directionMapIndex));
+									logger.debug("      Smoothed Direction = {}", oAverageDir.get());
 								}
 								/* Assign invalid direction with average direction. */
 								oDirectionMap.set(directionMapIndex, oAverageDir.get());
@@ -844,17 +1045,24 @@ public class Maps extends MindTct implements IMaps {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: generateHighCurveMap - Takes a Direction Map and generates a new map
-	 * #cat: that flags blocks with HIGH CURVATURE. Input: oHighCurvatureMap -
-	 * pointer to the High Curvature Map oDirectionMap - map of blocks containing
-	 * directional ridge flow mappedImageWidth - the width (in blocks) of the map
-	 * mappedImageHeight - the height (in blocks) of the map lfsParams - parameters
-	 * and thresholds for controlling LFS Output: oHighCurvatureMap - points to the
-	 * created High Curvature Map Return Code: Zero - successful completion Negative
-	 * - system error
-	 **************************************************************************/
+	/**
+	 * Generates the High Curvature Map from a Direction Map.
+	 *
+	 * Port of NIST {@code gen_high_curve_map()}. For each block with at least one valid neighbor:
+	 * if its direction is INVALID and it has at least {@link LfsParams#getVortValidNbrMin()} valid
+	 * neighbors, it is flagged when its neighbors' {@link #vorticity} reaches
+	 * {@link LfsParams#getHighcurvVorticityMin()}; if its direction is valid, it is flagged when its
+	 * {@link #curvature} reaches {@link LfsParams#getHighcurvCurvatureMin()}.
+	 *
+	 * @param oHighCurvatureMap output High Curvature Map; must be pre-allocated with one entry per
+	 *                          block and initialized to {@link ILfs#FALSE}. Flagged blocks are set to
+	 *                          {@link ILfs#TRUE} in place
+	 * @param oDirectionMap     Direction Map of blocks containing directional ridge flow
+	 * @param mappedImageWidth  width of the maps, in blocks
+	 * @param mappedImageHeight height of the maps, in blocks
+	 * @param lfsParams         LFS parameters and thresholds
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion
+	 */
 	public int generateHighCurveMap(AtomicIntegerArray oHighCurvatureMap, AtomicIntegerArray oDirectionMap,
 			final int mappedImageWidth, final int mappedImageHeight, final LfsParams lfsParams) {
 		AtomicInteger nvalid = new AtomicInteger(0);
@@ -906,22 +1114,35 @@ public class Maps extends MindTct implements IMaps {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: generateInputBlockImageMap - Computes an IMAP, which is a 2D vector of
-	 * integer directions, #cat: where each direction represents the dominant ridge
-	 * flow in #cat: a block of the input grayscale image. This routine will #cat:
-	 * generate an IMAP for arbitrarily sized, non-square, images. Input:
-	 * paddedImagedata - padded input image data (8 bits [0..256) grayscale)
-	 * paddedImageWidth - padded width (in pixels) of the input image
-	 * paddedImageHeight - padded height (in pixels) of the input image dirToRad -
-	 * lookup table for converting integer directions dftWaves - structure
-	 * containing the DFT wave forms dftGrids - structure containing the rotated
-	 * pixel grid offsets lfsParams - parameters and thresholds for controlling LFS
-	 * Output: ret - Zero - successful completion - Negative - system error
-	 * oMappedImageWidth - width (in blocks) of the IMAP oMappedImageHeight - height
-	 * (in blocks) of the IMAP Return Code: optr - points to the created IMAP
-	 **************************************************************************/
+	/**
+	 * Computes an IMAP: a 2D vector of integer directions, each representing the dominant ridge flow
+	 * in a block of the input grayscale image (LFS version 1).
+	 *
+	 * Port of NIST {@code gen_imap()}. Works for arbitrarily sized, non-square images. Steps: compute
+	 * block offsets (the DFT grids must be square and define the block size), build the initial IMAP
+	 * ({@link #initialiseInputBlockImageMap}), remove inconsistent directions
+	 * ({@link #removeInconsistentDirs}) and smooth the result ({@link #smoothInputBlockImageMap}).
+	 *
+	 * Note: the removal and smoothing steps read the map dimensions from this instance's
+	 * {@link #getMappedImageWidth()}/{@link #getMappedImageHeight()} rather than from the
+	 * dimensions computed here, so those fields must already match the IMAP size.
+	 *
+	 * @param ret                output return code: {@link ILfs#FALSE} ({@code 0}) on successful
+	 *                           completion; {@link ILfs#ERROR_CODE_60} ({@code -60}) if the DFT grids
+	 *                           are not square; another negative system error code otherwise
+	 * @param oMappedImageWidth  output width of the IMAP, in blocks (set on success)
+	 * @param oMappedImageHeight output height of the IMAP, in blocks (set on success)
+	 * @param paddedImagedata    padded input image data (8-bit grayscale, values [0..256)),
+	 *                           row-major
+	 * @param paddedImageWidth   width of the padded input image, in pixels
+	 * @param paddedImageHeight  height of the padded input image, in pixels
+	 * @param dirToRad           lookup table for converting integer directions to radians
+	 * @param dftWaves           structure containing the DFT wave forms
+	 * @param dftGrids           structure containing the rotated pixel grid offsets
+	 * @param lfsParams          LFS parameters and thresholds
+	 * @return the created IMAP (one direction or {@link ILfs#INVALID_DIR} per block), or
+	 *         {@code null} if an error occurred (see {@code ret})
+	 */
 	public AtomicIntegerArray generateInputBlockImageMap(AtomicInteger ret, AtomicInteger oMappedImageWidth,
 			AtomicInteger oMappedImageHeight, int[] paddedImagedata, final int paddedImageWidth,
 			final int paddedImageHeight, final DirToRad dirToRad, final DftWaves dftWaves, final RotGrids dftGrids,
@@ -959,6 +1180,10 @@ public class Maps extends MindTct implements IMaps {
 			return oInputBlockImageMap;
 		}
 
+		/* Steps 3 and 4 read the map dimensions from this instance. */
+		setMappedImageWidth(new AtomicInteger(mappedImageWidth.get()));
+		setMappedImageHeight(new AtomicInteger(mappedImageHeight.get()));
+
 		/* 3. Remove IMAP directions that are inconsistent with neighbors */
 		removeInconsistentDirs(oInputBlockImageMap, dirToRad, lfsParams);
 
@@ -974,27 +1199,32 @@ public class Maps extends MindTct implements IMaps {
 		return oInputBlockImageMap;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: initialiseInputBlockImageMap - Creates an initial IMAP from the given
-	 * input image. #cat: It very important that the image be properly padded so
-	 * #cat: that rotated grids along the boudary of the image do not #cat: access
-	 * unkown memory. The rotated grids are used by a #cat: DFT-based analysis to
-	 * determine the integer directions #cat: in the IMAP. Typically this initial
-	 * vector of directions will #cat: subsequently have weak or inconsistent
-	 * directions removed #cat: followed by a smoothing process. Input: ret - return
-	 * Code blockOffsets - offsets to the pixel origin of each block in the padded
-	 * image mappedImageWidth - number of blocks horizontally in the padded input
-	 * image mappedImageHeight - number of blocks vertically in the padded input
-	 * image paddedImagedata - padded input image data (8 bits [0..256) grayscale)
-	 * paddedImageWidth - width (in pixels) of the padded input image
-	 * paddedImageHeight - height (in pixels) of the padded input image dftWaves -
-	 * structure containing the DFT wave forms dftGrids - structure containing the
-	 * rotated pixel grid offsets lfsParams - parameters and thresholds for
-	 * controlling LFS Output: ret - Zero - successful completion - Negative -
-	 * system error Return Code: inputBlockImageMap - points to the newly created
-	 * IMAP
-	 **************************************************************************/
+	/**
+	 * Creates an initial IMAP from the padded input image.
+	 *
+	 * Port of NIST {@code gen_initial_imap()}. It is very important that the image be properly padded
+	 * so that rotated grids along the image boundary do not access unknown memory. For each block,
+	 * DFT directional powers and power statistics (skipping the first DFT wave) are computed and the
+	 * {@link #primaryDirectionTest} is applied, falling back to the {@link #secondaryForkTest};
+	 * blocks for which neither yields a direction remain {@link ILfs#INVALID_DIR}. Typically this
+	 * initial vector of directions will subsequently have weak or inconsistent directions removed,
+	 * followed by smoothing.
+	 *
+	 * @param ret               output return code: {@link ILfs#FALSE} ({@code 0}) on successful
+	 *                          completion; {@link ILfs#ERROR_CODE_70} ({@code -70}) if the IMAP could
+	 *                          not be allocated; another negative system error code otherwise
+	 * @param blockOffsets      offsets to the pixel origin of each block in the padded image
+	 * @param mappedImageWidth  number of blocks horizontally in the padded input image
+	 * @param mappedImageHeight number of blocks vertically in the padded input image
+	 * @param paddedImagedata   padded input image data (8-bit grayscale, values [0..256)),
+	 *                          row-major
+	 * @param paddedImageWidth  width of the padded input image, in pixels
+	 * @param paddedImageHeight height of the padded input image, in pixels
+	 * @param dftWaves          structure containing the DFT wave forms
+	 * @param dftGrids          structure containing the rotated pixel grid offsets
+	 * @param lfsParams         LFS parameters and thresholds
+	 * @return the newly created IMAP, or {@code null} if an error occurred (see {@code ret})
+	 */
 	@SuppressWarnings("unused")
 	public AtomicIntegerArray initialiseInputBlockImageMap(AtomicInteger ret, AtomicIntegerArray blockOffsets,
 			final AtomicInteger mappedImageWidth, final AtomicInteger mappedImageHeight, int[] paddedImagedata,
@@ -1011,7 +1241,7 @@ public class Maps extends MindTct implements IMaps {
 		int nStats;
 
 		if (isShowLogs())
-			logger.info("INITIAL MAP");
+			logger.debug("INITIAL MAP");
 		/* Compute total number of blocks in IMAP */
 		bSize = mappedImageWidth.get() * mappedImageHeight.get();
 		inputBlockImageMap = new AtomicIntegerArray(bSize);
@@ -1019,6 +1249,10 @@ public class Maps extends MindTct implements IMaps {
 			logger.error("ERROR : initialiseInputBlockImageMap : imap : NULL");
 			ret.set(ILfs.ERROR_CODE_70);
 			return inputBlockImageMap;
+		}
+		/* Initialize IMAP to INVALID_DIR */
+		for (int blockIndex = 0; blockIndex < bSize; blockIndex++) {
+			inputBlockImageMap.set(blockIndex, ILfs.INVALID_DIR);
 		}
 
 		/* Allocate DFT directional power vectors */
@@ -1127,26 +1361,35 @@ public class Maps extends MindTct implements IMaps {
 		return inputBlockImageMap;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: primaryDirectionTest - Applies the primary set of criteria for
-	 * selecting #cat: an IMAP integer direction from a set of DFT results #cat:
-	 * computed from a block of image data Input: powers - DFT power computed from
-	 * each (N) wave frequencies at each rotation direction in the current image
-	 * block wis - sorted order of the highest N-1 frequency power statistics
-	 * powmaxs - maximum power for each of the highest N-1 frequencies powmaxDirs -
-	 * directions associated with each of the N-1 maximum powers pownorms -
-	 * normalized power for each of the highest N-1 frequencies nStats - N-1 wave
-	 * frequencies (where N is the length of dft_coefs) lfsParams - parameters and
-	 * thresholds for controlling LFS Return Code: Zero or Positive - The selected
-	 * IMAP integer direction INVALID_DIR - IMAP Integer direction could not be
-	 * determined
-	 **************************************************************************/
+	/**
+	 * Applies the primary set of criteria for selecting a block's integer direction from its DFT
+	 * results.
+	 *
+	 * Port of NIST {@code primary_dir_test()}. The power statistics are examined in decreasing order
+	 * of strength; the first one that satisfies all three criteria determines the direction:
+	 * <ol>
+	 * <li>its maximum power exceeds {@link LfsParams#getPowmaxMin()} (e.g. 100000);</li>
+	 * <li>its normalized power exceeds {@link LfsParams#getPownormMin()} (e.g. 3.8);</li>
+	 * <li>the power of the lowest DFT frequency at that direction does not exceed
+	 * {@link LfsParams#getPowmaxMax()} (e.g. 50000000).</li>
+	 * </ol>
+	 *
+	 * @param powers     DFT power computed for each of the N wave frequencies at each rotation
+	 *                   direction in the current image block (index 0 is the lowest frequency)
+	 * @param wis        sorted order (strongest first) of the highest N-1 frequency power statistics
+	 * @param powmaxs    maximum power for each of the highest N-1 frequencies
+	 * @param powmaxDirs directions associated with each of the N-1 maximum powers
+	 * @param pownorms   normalized power for each of the highest N-1 frequencies
+	 * @param nStats     number of statistics, N-1 (where N is the number of DFT waves)
+	 * @param lfsParams  LFS parameters and thresholds
+	 * @return the selected integer direction (zero or positive), or {@link ILfs#INVALID_DIR} if no
+	 *         direction could be determined
+	 */
 	public int primaryDirectionTest(AtomicReferenceArray<Double[]> powers, final AtomicIntegerArray wis,
 			final AtomicReferenceArray<Double> powmaxs, final AtomicIntegerArray powmaxDirs,
 			final AtomicReferenceArray<Double> pownorms, final int nStats, final LfsParams lfsParams) {
 		if (isShowLogs())
-			logger.info("      Primary");
+			logger.debug("      Primary");
 
 		/* Look at max power statistics in decreasing order ... */
 		for (int statIndex = 0; statIndex < nStats; statIndex++) {
@@ -1160,15 +1403,15 @@ public class Maps extends MindTct implements IMaps {
 					(powers.get(0)[powmaxDirs.get(wis.get(statIndex))] <= lfsParams.getPowmaxMax())) {
 				/* Add 1 to wis[w] to create index to original dft_coefs[] */
 				if (isShowLogs()) {
-					logger.info("         Selected Wave = {}", (wis.get(statIndex) + 1));
-					logger.info("         1. Power Magnitude ({} > {})", powmaxs.get(wis.get(statIndex)),
+					logger.debug("         Selected Wave = {}", (wis.get(statIndex) + 1));
+					logger.debug("         1. Power Magnitude ({} > {})", powmaxs.get(wis.get(statIndex)),
 							lfsParams.getPowmaxMin());
-					logger.info("         2. Norm Power Magnitude ({} > {})", pownorms.get(wis.get(statIndex)),
+					logger.debug("         2. Norm Power Magnitude ({} > {})", pownorms.get(wis.get(statIndex)),
 							lfsParams.getPownormMin());
-					logger.info("         3. Low Freq Wave Magnitude ({} <= {})",
+					logger.debug("         3. Low Freq Wave Magnitude ({} <= {})",
 							powers.get(0)[powmaxDirs.get(wis.get(statIndex))], lfsParams.getPowmaxMax());
-					logger.info("         PASSED");
-					logger.info("         Selected Direction = {}", powmaxDirs.get(wis.get(statIndex)));
+					logger.debug("         PASSED");
+					logger.debug("         Selected Direction = {}", powmaxDirs.get(wis.get(statIndex)));
 				}
 				/* If ALL 3 criteria met, return current max power direction. */
 				return (powmaxDirs.get(wis.get(statIndex)));
@@ -1177,31 +1420,38 @@ public class Maps extends MindTct implements IMaps {
 
 		/* Otherwise test failed. */
 		if (isShowLogs()) {
-			logger.info("         1. Power Magnitude ( > {})", lfsParams.getPowmaxMin());
-			logger.info("         2. Norm Power Magnitude ( > {})", lfsParams.getPownormMin());
-			logger.info("         3. Low Freq Wave Magnitude ( <= {})", lfsParams.getPowmaxMax());
-			logger.info("         FAILED");
+			logger.debug("         1. Power Magnitude ( > {})", lfsParams.getPowmaxMin());
+			logger.debug("         2. Norm Power Magnitude ( > {})", lfsParams.getPownormMin());
+			logger.debug("         3. Low Freq Wave Magnitude ( <= {})", lfsParams.getPowmaxMax());
+			logger.debug("         FAILED");
 		}
 		return ILfs.INVALID_DIR;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: secondaryForkTest - Applies a secondary set of criteria for selecting
-	 * #cat: an IMAP integer direction from a set of DFT results #cat: computed from
-	 * a block of image data. This test #cat: analyzes the strongest power
-	 * statistics associated #cat: with a given frequency and direction and analyses
-	 * #cat: small changes in direction to the left and right to #cat: determine if
-	 * the block contains a "fork". Input: powers - DFT power computed from each (N)
-	 * wave frequencies at each rotation direction in the current image block wis -
-	 * sorted order of the highest N-1 frequency power statistics powmaxs - maximum
-	 * power for each of the highest N-1 frequencies powmaxDirs - directions
-	 * associated with each of the N-1 maximum powers pownorms - normalized power
-	 * for each of the highest N-1 frequencies nStats - N-1 wave frequencies (where
-	 * N is the length of dft_coefs) lfsParams - parameters and thresholds for
-	 * controlling LFS Return Code: Zero or Positive - The selected IMAP integer
-	 * direction INVALID_DIR - IMAP Integer direction could not be determined
-	 **************************************************************************/
+	/**
+	 * Applies a secondary set of criteria for selecting a block's integer direction, designed to
+	 * detect blocks containing a ridge "fork".
+	 *
+	 * Port of NIST {@code secondary_fork_test()}. Only the strongest power statistic is considered.
+	 * It must have maximum power above {@link LfsParams#getPowmaxMin()}, normalized power at least
+	 * {@code getForkPctPownorm() * getPownormMin()} (a relaxed threshold, e.g. 2.85), and
+	 * lowest-frequency power at that direction not above {@link LfsParams#getPowmaxMax()}. Then the
+	 * powers at the directions {@link LfsParams#getForkInterval()} steps to the left and right
+	 * (modulo the number of directions) are compared against
+	 * {@code getForkPctPowmax() * powmax} (e.g. 0.7 of the maximum power): exactly one of the two
+	 * fork angles must exceed that threshold.
+	 *
+	 * @param powers     DFT power computed for each of the N wave frequencies at each rotation
+	 *                   direction in the current image block (index 0 is the lowest frequency)
+	 * @param wis        sorted order (strongest first) of the highest N-1 frequency power statistics
+	 * @param powmaxs    maximum power for each of the highest N-1 frequencies
+	 * @param powmaxDirs directions associated with each of the N-1 maximum powers
+	 * @param pownorms   normalized power for each of the highest N-1 frequencies
+	 * @param nStats     number of statistics, N-1 (where N is the number of DFT waves)
+	 * @param lfsParams  LFS parameters and thresholds
+	 * @return the direction of the strongest power statistic if the fork criteria hold, otherwise
+	 *         {@link ILfs#INVALID_DIR}
+	 */
 	public int secondaryForkTest(AtomicReferenceArray<Double[]> powers, final AtomicIntegerArray wis,
 			final AtomicReferenceArray<Double> powmaxs, final AtomicIntegerArray powmaxDirs,
 			final AtomicReferenceArray<Double> pownorms, final int nStats, final LfsParams lfsParams) {
@@ -1212,7 +1462,7 @@ public class Maps extends MindTct implements IMaps {
 
 		int firstpart = 0; /* Flag to determine if passed 1st part ... */
 		if (isShowLogs())
-			logger.info("      Secondary");
+			logger.debug("      Secondary");
 
 		/* Relax the normalized power threshold under fork conditions. */
 		forkPownormMin = lfsParams.getForkPctPownorm() * lfsParams.getPownormMin();
@@ -1229,10 +1479,10 @@ public class Maps extends MindTct implements IMaps {
 			/* First part passed ... */
 			firstpart = 1;
 			if (isShowLogs()) {
-				logger.info("         Selected Wave = {}", (wis.get(0) + 1));
-				logger.info("         1. Power Magnitude ({} > {})", powmaxs.get(wis.get(0)), lfsParams.getPowmaxMin());
-				logger.info("         2. Norm Power Magnitude ({} >= {})", pownorms.get(wis.get(0)), forkPownormMin);
-				logger.info("         3. Low Freq Wave Magnitude ({} <= {})", powers.get(0)[powmaxDirs.get(wis.get(0))],
+				logger.debug("         Selected Wave = {}", (wis.get(0) + 1));
+				logger.debug("         1. Power Magnitude ({} > {})", powmaxs.get(wis.get(0)), lfsParams.getPowmaxMin());
+				logger.debug("         2. Norm Power Magnitude ({} >= {})", pownorms.get(wis.get(0)), forkPownormMin);
+				logger.debug("         3. Low Freq Wave Magnitude ({} <= {})", powers.get(0)[powmaxDirs.get(wis.get(0))],
 						lfsParams.getPowmaxMax());
 			}
 
@@ -1267,12 +1517,12 @@ public class Maps extends MindTct implements IMaps {
 					&& ((powers.get(wis.get(0) + 1)[leftDir] > forkPowThresh)
 							|| (powers.get(wis.get(0) + 1)[rightDir] > forkPowThresh))) {
 				if (isShowLogs()) {
-					logger.info("         4. Left Power Magnitude ({} > {})", powers.get(wis.get(0) + 1)[leftDir],
+					logger.debug("         4. Left Power Magnitude ({} > {})", powers.get(wis.get(0) + 1)[leftDir],
 							forkPowThresh);
-					logger.info("         5. Right Power Magnitude ({} > {})", powers.get(wis.get(0) + 1)[rightDir],
+					logger.debug("         5. Right Power Magnitude ({} > {})", powers.get(wis.get(0) + 1)[rightDir],
 							forkPowThresh);
-					logger.info("         PASSED");
-					logger.info("         Selected Direction = {}", powmaxDirs.get(wis.get(0)));
+					logger.debug("         PASSED");
+					logger.debug("         Selected Direction = {}", powmaxDirs.get(wis.get(0)));
 				}
 				/* If ALL the above criteria hold, then return the direction */
 				/* of the largest max power. */
@@ -1284,19 +1534,22 @@ public class Maps extends MindTct implements IMaps {
 		return ILfs.INVALID_DIR;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeInconsistentDirs - Takes a vector of integer directions and
-	 * removes #cat: individual directions that are too weak or inconsistent. #cat:
-	 * Directions are tested from the center of the IMAP working #cat: outward in
-	 * concentric squares, and the process resets to #cat: the center and continues
-	 * until no changes take place during #cat: a complete pass. Input:
-	 * oInputBlockImageMap - vector of IMAP integer directions //mappedImageWidth -
-	 * width (in blocks) of the IMAP //mappedImageHeight - height (in blocks) of the
-	 * IMAP dirToRad - lookup table for converting integer directions lfsParams -
-	 * parameters and thresholds for controlling LFS Output: imap - vector of pruned
-	 * input values
-	 **************************************************************************/
+	/**
+	 * Removes individual directions that are too weak or inconsistent with their neighbors.
+	 *
+	 * Port of NIST {@code remove_incon_dirs()}. Directions are tested with
+	 * {@link #removeIMAPDirection}, starting at the center of the map and working outward in
+	 * concentric squares (top, right, bottom, then left edge of each square). Removed directions are
+	 * set to {@link ILfs#INVALID_DIR}. Complete passes are repeated, restarting at the center, until
+	 * a pass removes nothing.
+	 *
+	 * The map dimensions are taken from this instance's {@link #getMappedImageWidth()} and
+	 * {@link #getMappedImageHeight()}.
+	 *
+	 * @param oInputBlockImageMap Direction Map / IMAP of integer directions; pruned in place
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 */
 	public void removeInconsistentDirs(AtomicIntegerArray oInputBlockImageMap, final DirToRad dirToRad,
 			final LfsParams lfsParams) {
 		int mappedImageXIndex;
@@ -1312,7 +1565,7 @@ public class Maps extends MindTct implements IMaps {
 
 		int numPass = 0;
 		if (isShowLogs())
-			logger.info("REMOVE MAP");
+			logger.debug("REMOVE MAP");
 		/* Compute center coords of IMAP */
 		mappedImageXIndex = mappedImageWidth >> 1;
 		mappedImageYIndex = mappedImageHeight >> 1;
@@ -1322,7 +1575,7 @@ public class Maps extends MindTct implements IMaps {
 			/* Count number of complete passes through IMAP */
 			++numPass;
 			if (isShowLogs())
-				logger.info("REMOVE MAP PASS = {}, {}, {}", numPass, oInputBlockImageMap.length(), nRemoved);
+				logger.debug("REMOVE MAP PASS = {}, {}, {}", numPass, oInputBlockImageMap.length(), nRemoved);
 			/* Reinitialize number of removed directions to 0 */
 			nRemoved = 0;
 
@@ -1382,21 +1635,27 @@ public class Maps extends MindTct implements IMaps {
 		} while (nRemoved != ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: testTopEdge - Walks the top edge of a concentric square in the IMAP,
-	 * #cat: testing directions along the way to see if they should #cat: be removed
-	 * due to being too weak or inconsistent with #cat: respect to their adjacent
-	 * neighbors. Input: leftBoxIndex - left edge of current concentric square
-	 * topBoxIndex - top edge of current concentric square rightBoxIndex - right
-	 * edge of current concentric square bottomBoxIndex - bottom edge of current
-	 * concentric square oInputBlockImageMap - vector of IMAP integer directions
-	 * mappedImageWidth - width (in blocks) of the IMAP mappedImageHeight - height
-	 * (in blocks) of the IMAP dirToRad - lookup table for converting integer
-	 * directions lfsParams - parameters and thresholds for controlling LFS Return
-	 * Code: Positive - direction should be removed from IMAP Zero - direction
-	 * should NOT be remove from IMAP
-	 **************************************************************************/
+	/**
+	 * Walks one edge of a concentric square in the map, testing directions along the way to see
+	 * if they should be removed for being too weak or inconsistent with their neighbors.
+	 *
+	 * Port of NIST {@code test_top_edge()}. Walks the
+	 * top edge, left to right, from the top-left corner (clamped to column 0)
+	 * up to one block short of the top-right corner (clamped to the last column),
+	 * applying {@link #removeIMAPDirection} to every valid direction.
+	 *
+	 * @param leftBoxIndex        left edge (block x) of the current concentric square
+	 * @param topBoxIndex         top edge (block y) of the current concentric square
+	 * @param rightBoxIndex       right edge (block x) of the current concentric square
+	 * @param bottomBoxIndex      bottom edge (block y) of the current concentric square
+	 * @param oInputBlockImageMap map of integer directions; removed directions are set to
+	 *                            {@link ILfs#INVALID_DIR} in place
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return the number of directions removed along this edge (zero or positive)
+	 */
 	public int testTopEdge(final int leftBoxIndex, final int topBoxIndex, final int rightBoxIndex,
 			final int bottomBoxIndex, AtomicIntegerArray oInputBlockImageMap, final int mappedImageWidth,
 			final int mappedImageHeight, DirToRad dirToRad, LfsParams lfsParams) {
@@ -1435,21 +1694,27 @@ public class Maps extends MindTct implements IMaps {
 		return (nRemoved);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: testRightEdge - Walks the right edge of a concentric square in the
-	 * #cat: IMAP, testing directions along the way to see if they #cat: should be
-	 * removed due to being too weak or inconsistent #cat: with respect to their
-	 * adjacent neighbors. Input: leftBoxIndex - left edge of current concentric
-	 * square topBoxIndex - top edge of current concentric square rightBoxIndex -
-	 * right edge of current concentric square bottomBoxIndex - bottom edge of
-	 * current concentric square oInputBlockImageMap - vector of IMAP integer
-	 * directions mappedImageWidth - width (in blocks) of the IMAP mappedImageHeight
-	 * - height (in blocks) of the IMAP dirToRad - lookup table for converting
-	 * integer directions lfsParams - parameters and thresholds for controlling LFS
-	 * Return Code: Positive - direction should be removed from IMAP Zero -
-	 * direction should NOT be remove from IMAP
-	 **************************************************************************/
+	/**
+	 * Walks one edge of a concentric square in the map, testing directions along the way to see
+	 * if they should be removed for being too weak or inconsistent with their neighbors.
+	 *
+	 * Port of NIST {@code test_right_edge()}. Walks the
+	 * right edge, top to bottom, from the top-right corner (clamped to row
+	 * 0) up to one block short of the bottom-right corner (clamped to the last row),
+	 * applying {@link #removeIMAPDirection} to every valid direction.
+	 *
+	 * @param leftBoxIndex        left edge (block x) of the current concentric square
+	 * @param topBoxIndex         top edge (block y) of the current concentric square
+	 * @param rightBoxIndex       right edge (block x) of the current concentric square
+	 * @param bottomBoxIndex      bottom edge (block y) of the current concentric square
+	 * @param oInputBlockImageMap map of integer directions; removed directions are set to
+	 *                            {@link ILfs#INVALID_DIR} in place
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return the number of directions removed along this edge (zero or positive)
+	 */
 	public int testRightEdge(final int leftBoxIndex, final int topBoxIndex, final int rightBoxIndex,
 			final int bottomBoxIndex, AtomicIntegerArray oInputBlockImageMap, final int mappedImageWidth,
 			final int mappedImageHeight, DirToRad dirToRad, LfsParams lfsParams) {
@@ -1488,21 +1753,27 @@ public class Maps extends MindTct implements IMaps {
 		return (nRemoved);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: testBottomEdge - Walks the bottom edge of a concentric square in the
-	 * #cat: IMAP, testing directions along the way to see if they #cat: should be
-	 * removed due to being too weak or inconsistent #cat: with respect to their
-	 * adjacent neighbors. Input: leftBoxIndex - left edge of current concentric
-	 * square topBoxIndex - top edge of current concentric square rightBoxIndex -
-	 * right edge of current concentric square bottomBoxIndex - bottom edge of
-	 * current concentric square oInputBlockImageMap - vector of IMAP integer
-	 * directions mappedImageWidth - width (in blocks) of the IMAP mappedImageHeight
-	 * - height (in blocks) of the IMAP dirToRad - lookup table for converting
-	 * integer directions lfsParams - parameters and thresholds for controlling LFS
-	 * Return Code: Positive - direction should be removed from IMAP Zero -
-	 * direction should NOT be remove from IMAP
-	 **************************************************************************/
+	/**
+	 * Walks one edge of a concentric square in the map, testing directions along the way to see
+	 * if they should be removed for being too weak or inconsistent with their neighbors.
+	 *
+	 * Port of NIST {@code test_bottom_edge()}. Walks the
+	 * bottom edge, right to left, from the bottom-right corner (clamped to
+	 * the last column) up to one block short of the bottom-left corner (clamped to column 0),
+	 * applying {@link #removeIMAPDirection} to every valid direction.
+	 *
+	 * @param leftBoxIndex        left edge (block x) of the current concentric square
+	 * @param topBoxIndex         top edge (block y) of the current concentric square
+	 * @param rightBoxIndex       right edge (block x) of the current concentric square
+	 * @param bottomBoxIndex      bottom edge (block y) of the current concentric square
+	 * @param oInputBlockImageMap map of integer directions; removed directions are set to
+	 *                            {@link ILfs#INVALID_DIR} in place
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return the number of directions removed along this edge (zero or positive)
+	 */
 	public int testBottomEdge(final int leftBoxIndex, final int topBoxIndex, final int rightBoxIndex,
 			final int bottomBoxIndex, AtomicIntegerArray oInputBlockImageMap, final int mappedImageWidth,
 			final int mappedImageHeight, DirToRad dirToRad, LfsParams lfsParams) {
@@ -1546,21 +1817,27 @@ public class Maps extends MindTct implements IMaps {
 		return (nRemoved);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: testLeftEdge - Walks the left edge of a concentric square in the IMAP,
-	 * #cat: testing directions along the way to see if they should #cat: be removed
-	 * due to being too weak or inconsistent with #cat: respect to their adjacent
-	 * neighbors. Input: leftBoxIndex - left edge of current concentric square
-	 * topBoxIndex - top edge of current concentric square rightBoxIndex - right
-	 * edge of current concentric square bottomBoxIndex - bottom edge of current
-	 * concentric square oInputBlockImageMap - vector of IMAP integer directions
-	 * mappedImageWidth - width (in blocks) of the IMAP mappedImageHeight - height
-	 * (in blocks) of the IMAP dirToRad - lookup table for converting integer
-	 * directions lfsParams - parameters and thresholds for controlling LFS Return
-	 * Code: Positive - direction should be removed from IMAP Zero - direction
-	 * should NOT be remove from IMAP
-	 **************************************************************************/
+	/**
+	 * Walks one edge of a concentric square in the map, testing directions along the way to see
+	 * if they should be removed for being too weak or inconsistent with their neighbors.
+	 *
+	 * Port of NIST {@code test_left_edge()}. Walks the
+	 * left edge, bottom to top, from the bottom-left corner (clamped to the
+	 * last row) up to one block short of the top-left corner (clamped to row 0),
+	 * applying {@link #removeIMAPDirection} to every valid direction.
+	 *
+	 * @param leftBoxIndex        left edge (block x) of the current concentric square
+	 * @param topBoxIndex         top edge (block y) of the current concentric square
+	 * @param rightBoxIndex       right edge (block x) of the current concentric square
+	 * @param bottomBoxIndex      bottom edge (block y) of the current concentric square
+	 * @param oInputBlockImageMap map of integer directions; removed directions are set to
+	 *                            {@link ILfs#INVALID_DIR} in place
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return the number of directions removed along this edge (zero or positive)
+	 */
 	public int testLeftEdge(final int leftBoxIndex, final int topBoxIndex, final int rightBoxIndex,
 			final int bottomBoxIndex, AtomicIntegerArray oInputBlockImageMap, final int mappedImageWidth,
 			final int mappedImageHeight, DirToRad dirToRad, LfsParams lfsParams) {
@@ -1602,18 +1879,29 @@ public class Maps extends MindTct implements IMaps {
 		return (nRemoved);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeIMAPDirection - Determines if an IMAP direction should be removed
-	 * based #cat: on analyzing its adjacent neighbors Input: oInputBlockImageMap -
-	 * vector of IMAP integer directions mappedImageXIndex - IMAP X-coord of the
-	 * current direction being tested mappedImageYIndex - IMPA Y-coord of the
-	 * current direction being tested mappedImageWidth - width (in blocks) of the
-	 * IMAP mappedImageHeight - height (in blocks) of the IMAP dirToRad - lookup
-	 * table for converting integer directions lfsParams - parameters and thresholds
-	 * for controlling LFS Return Code: Positive - direction should be removed from
-	 * IMAP Zero - direction should NOT be remove from IMAP
-	 **************************************************************************/
+	/**
+	 * Determines whether a block's direction should be removed, based on its 8 adjacent neighbors.
+	 *
+	 * Port of NIST {@code remove_dir()}. The average neighbor direction, its strength and the number
+	 * of valid neighbors are computed ({@link #average8NbrDir}). The direction is removed if:
+	 * <ol>
+	 * <li>fewer than {@link LfsParams#getRmvValidNbrMin()} (e.g. 3) neighbors are valid; or</li>
+	 * <li>the average direction is strong enough to put credence in (strength at least
+	 * {@link LfsParams#getDirStrengthMin()}, e.g. 0.2) and the minimum circular distance between the
+	 * block's direction and the average exceeds {@link LfsParams#getDirDistanceMax()} (e.g. 3).</li>
+	 * </ol>
+	 *
+	 * @param oInputBlockImageMap map of integer directions (not modified)
+	 * @param mappedImageXIndex   block x-coordinate of the direction being tested
+	 * @param mappedImageYIndex   block y-coordinate of the direction being tested
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return {@code 1} ({@link ILfs#TRUE}) if the direction should be removed because of too few
+	 *         valid neighbors; {@code 2} if it should be removed because it differs too much from the
+	 *         average neighbor direction; {@link ILfs#FALSE} ({@code 0}) if it should NOT be removed
+	 */
 	@SuppressWarnings({ "java:S2629" })
 	public int removeIMAPDirection(AtomicIntegerArray oInputBlockImageMap, final int mappedImageXIndex,
 			final int mappedImageYIndex, final int mappedImageWidth, final int mappedImageHeight,
@@ -1630,11 +1918,11 @@ public class Maps extends MindTct implements IMaps {
 		/* Conduct valid neighbor test (Ex. thresh==3) */
 		if (oValid.get() < lfsParams.getRmvValidNbrMin()) {
 			if (isShowLogs()) {
-				logger.info("      BLOCK {} ({}, {})", mappedImageXIndex + (mappedImageYIndex * mappedImageWidth),
+				logger.debug("      BLOCK {} ({}, {})", mappedImageXIndex + (mappedImageYIndex * mappedImageWidth),
 						mappedImageXIndex, mappedImageYIndex);
-				logger.info("         Average NBR :   {} {} {}", oAverageDirection.get(), dirStrength.get(),
+				logger.debug("         Average NBR :   {} {} {}", oAverageDirection.get(), dirStrength.get(),
 						oValid.get());
-				logger.info("         1. Valid NBR ({} < {})", oValid.get(), lfsParams.getRmvValidNbrMin());
+				logger.debug("         1. Valid NBR ({} < {})", oValid.get(), lfsParams.getRmvValidNbrMin());
 			}
 			return (ILfs.TRUE);
 		}
@@ -1650,17 +1938,17 @@ public class Maps extends MindTct implements IMaps {
 			nDistance = Math.min(nDistance, dirToRad.getNDirs() - nDistance);
 			if (nDistance > lfsParams.getDirDistanceMax()) {
 				if (isShowLogs()) {
-					logger.info("      BLOCK {} ({}, {})", mappedImageXIndex + (mappedImageYIndex * mappedImageWidth),
+					logger.debug("      BLOCK {} ({}, {})", mappedImageXIndex + (mappedImageYIndex * mappedImageWidth),
 							mappedImageXIndex, mappedImageYIndex);
-					logger.info("         Average NBR :   {} {} {}", oAverageDirection.get(), dirStrength.get(),
+					logger.debug("         Average NBR :   {} {} {}", oAverageDirection.get(), dirStrength.get(),
 							oValid.get());
-					logger.info("         1. Valid NBR ({} < {})", oValid.get(), lfsParams.getRmvValidNbrMin());
-					logger.info("         2. Direction Strength ({} >= {})", dirStrength.get(),
+					logger.debug("         1. Valid NBR ({} < {})", oValid.get(), lfsParams.getRmvValidNbrMin());
+					logger.debug("         2. Direction Strength ({} >= {})", dirStrength.get(),
 							lfsParams.getDirStrengthMin());
-					logger.info("         Current Dir =  {}, Average Dir = {}",
+					logger.debug("         Current Dir =  {}, Average Dir = {}",
 							oInputBlockImageMap.get((mappedImageYIndex * mappedImageWidth) + mappedImageXIndex),
 							oAverageDirection.get());
-					logger.info("         3. Direction Distance ({} > {})", nDistance, lfsParams.getDirDistanceMax());
+					logger.debug("         3. Direction Distance ({} > {})", nDistance, lfsParams.getDirDistanceMax());
 				}
 				return (2);
 			}
@@ -1672,19 +1960,28 @@ public class Maps extends MindTct implements IMaps {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: average8NbrDir - Given an IMAP direction, computes an average #cat:
-	 * direction from its adjacent 8 neighbors returning #cat: the average
-	 * direction, its strength, and the #cat: number of valid direction in the
-	 * neighborhood. Input: oInputBlockImageMap - vector of IMAP integer directions
-	 * mapXIndex - IMAP X-coord of the current direction my - IMPA Y-coord of the
-	 * current direction mappedImageWidth - width (in blocks) of the IMAP
-	 * mappedImageHeight - height (in blocks) of the IMAP dirToRad - lookup table
-	 * for converting integer directions Output: oAverageDir - the average direction
-	 * computed from neighbors oDirStrength - the strength of the average direction
-	 * oValid - the number of valid directions used to compute the average
-	 **************************************************************************/
+	/**
+	 * Computes the average direction of a block's 8 adjacent neighbors, together with its strength
+	 * and the number of valid neighbors used.
+	 *
+	 * Port of NIST {@code average_8nbr_dir()}. The cosine and sine components of each valid
+	 * neighbor direction (via {@code dirToRad}) are averaged. The strength is the squared magnitude
+	 * of the averaged vector (on the range [0..1]), truncated to {@link ILfs#TRUNC_SCALE}
+	 * precision. If no neighbor is valid, or the strength is below {@link ILfs#DIR_STRENGTH_MIN},
+	 * the average is {@link ILfs#INVALID_DIR} with strength {@code 0}. Otherwise the angle
+	 * {@code atan2(sin, cos)} is mapped onto {@code [0..2PI)}, converted to integer direction units
+	 * ({@code nDirs} per full period), truncated, rounded and reduced modulo {@code nDirs}.
+	 *
+	 * @param oAverageDir         output average direction, or {@link ILfs#INVALID_DIR}
+	 * @param oDirStrength        output strength of the average direction (range [0..1])
+	 * @param oValid              output number of valid neighbor directions used
+	 * @param oInputBlockImageMap map of integer directions
+	 * @param mapXIndex           block x-coordinate of the current block
+	 * @param mapYIndex           block y-coordinate of the current block
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 */
 	public void average8NbrDir(AtomicInteger oAverageDir, AtomicReference<Double> oDirStrength, AtomicInteger oValid,
 			AtomicIntegerArray oInputBlockImageMap, final int mapXIndex, final int mapYIndex,
 			final int mappedImageWidth, final int mappedImageHeight, final DirToRad dirToRad) {
@@ -1883,16 +2180,19 @@ public class Maps extends MindTct implements IMaps {
 		oAverageDir.set(oAverageDir.get() % dirToRad.getNDirs());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: numValid8Nbrs - Given a block in an IMAP, counts the number of #cat:
-	 * immediate neighbors that have a valid IMAP direction. Input:
-	 * oInputBlockImageMap - 2-D vector of directional ridge flows mapXIndex -
-	 * horizontal coord of current block in IMAP my - vertical coord of current
-	 * block in IMAP mappedImageWidth - width (in blocks) of the IMAP
-	 * mappedImageHeight - height (in blocks) of the IMAP Return Code: Non-negative
-	 * - the number of valid IMAP neighbors
-	 **************************************************************************/
+	/**
+	 * Counts the immediate (8-connected) neighbors of a block that have a valid direction.
+	 *
+	 * Port of NIST {@code num_valid_8nbrs()}. A neighbor is valid when it lies within the map and
+	 * its value is {@code >= 0}.
+	 *
+	 * @param oInputBlockImageMap 2D map of directional ridge flows
+	 * @param mapXIndex           block x-coordinate of the current block
+	 * @param mapYIndex           block y-coordinate of the current block
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @return the number of valid neighbors (0 to 8)
+	 */
 	public int numValid8Nbrs(AtomicIntegerArray oInputBlockImageMap, final int mapXIndex, final int mapYIndex,
 			final int mappedImageWidth, final int mappedImageHeight) {
 		int eastIndex;
@@ -1962,16 +2262,24 @@ public class Maps extends MindTct implements IMaps {
 		return (nValid);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: InputBlockImageMap - Takes a vector of integer directions and smooths
-	 * them #cat: by analyzing the direction of adjacent neighbors. Input:
-	 * oInputBlockImageMap - vector of IMAP integer directions //mappedImageWidth -
-	 * width (in blocks) of the IMAP //mappedImageHeight - height (in blocks) of the
-	 * IMAP dirToRad - lookup table for converting integer directions lfsParams -
-	 * parameters and thresholds for controlling LFS Output: oInputBlockImageMap -
-	 * vector of smoothed input values
-	 **************************************************************************/
+	/**
+	 * Smooths an IMAP by analyzing the directions of each block's 8 neighbors.
+	 *
+	 * Port of NIST {@code smooth_imap()}. For every block, the average neighbor direction, its
+	 * strength and the number of valid neighbors are computed ({@link #average8NbrDir}). If the
+	 * strength is at least {@link LfsParams#getDirStrengthMin()} (e.g. 0.2), a valid direction is
+	 * replaced by the average when there are at least {@link LfsParams#getRmvValidNbrMin()} (e.g. 3)
+	 * valid neighbors, and an INVALID direction is assigned the average when there are at least
+	 * {@link LfsParams#getSmoothValidNbrMin()} (e.g. 7) valid neighbors. Updates are applied in
+	 * place in raster order.
+	 *
+	 * The map dimensions are taken from this instance's {@link #getMappedImageWidth()} and
+	 * {@link #getMappedImageHeight()}.
+	 *
+	 * @param oInputBlockImageMap IMAP of integer directions; smoothed in place
+	 * @param dirToRad            lookup table for converting integer directions to radians
+	 * @param lfsParams           LFS parameters and thresholds
+	 */
 	public void smoothInputBlockImageMap(AtomicIntegerArray oInputBlockImageMap, final DirToRad dirToRad,
 			final LfsParams lfsParams) {
 		int inputBlockImageMapIndex = 0;
@@ -1983,10 +2291,10 @@ public class Maps extends MindTct implements IMaps {
 		AtomicReference<Double> oDirStrength = new AtomicReference<>();
 
 		if (isShowLogs())
-			logger.info("SMOOTH MAP");
-		inputBlockImageMapIndexValue = oInputBlockImageMap.get(inputBlockImageMapIndex);
+			logger.debug("SMOOTH MAP");
 		for (int mapYIndex = 0; mapYIndex < mappedImageHeight; mapYIndex++) {
 			for (int mapXIndex = 0; mapXIndex < mappedImageWidth; mapXIndex++) {
+				inputBlockImageMapIndexValue = oInputBlockImageMap.get(inputBlockImageMapIndex);
 				/* Compute average direction from neighbors, returning the */
 				/* number of valid neighbors used in the computation, and */
 				/* the "strength" of the average direction. */
@@ -1999,7 +2307,7 @@ public class Maps extends MindTct implements IMaps {
 					/* If IMAP direction is valid ... */
 					if (inputBlockImageMapIndexValue != ILfs.INVALID_DIR) {
 						/* Conduct valid neighbor test (Ex. thresh==3)... */
-						if (oValid.get() >= lfsParams.getRmValidNbrMin()) {
+						if (oValid.get() >= lfsParams.getRmvValidNbrMin()) {
 							/* Reassign valid IMAP direction with average direction. */
 							inputBlockImageMapIndexValue = averageDir.get();
 						}
@@ -2016,25 +2324,36 @@ public class Maps extends MindTct implements IMaps {
 				}
 				/* Bump to next IMAP direction. */
 				oInputBlockImageMap.set(inputBlockImageMapIndex++, inputBlockImageMapIndexValue);
-				inputBlockImageMapIndexValue = oInputBlockImageMap.get(inputBlockImageMapIndex);
 			}
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: genNMap - Computes an NMAP from its associated 2D vector of integer
-	 * #cat: directions (IMAP). Each value in the NMAP either represents #cat: a
-	 * direction of dominant ridge flow in a block of the input #cat: grayscale
-	 * image, or it contains a codes describing why such #cat: a direction was not
-	 * procuded. #cat: For example, blocks near areas of high-curvature (such as
-	 * #cat: with cores and deltas) will not produce reliable IMAP #cat: directions.
-	 * Input: oInputBlockImageMap - associated input vector of IMAP directions
-	 * mappedImageWidth - the width (in blocks) of the IMAP mappedImageHeight - the
-	 * height (in blocks) of the IMAP lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oNMap - points to the created NMAP Return Code: Zero
-	 * - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Computes an NMAP from its associated IMAP.
+	 *
+	 * Port of NIST {@code gen_nmap()}. Each NMAP value either holds the direction of dominant ridge
+	 * flow in a block, or a code describing why such a direction was not produced. For example,
+	 * blocks near areas of high curvature (such as cores and deltas) will not produce reliable IMAP
+	 * directions. Per block:
+	 * <ul>
+	 * <li>no valid neighbors: {@link ILfs#NO_VALID_NBRS} ({@code -3});</li>
+	 * <li>INVALID IMAP value with fewer than {@link LfsParams#getVortValidNbrMin()} valid
+	 * neighbors, or with {@link #vorticity} below {@link LfsParams#getHighcurvVorticityMin()}:
+	 * {@link ILfs#INVALID_DIR} ({@code -1}); otherwise {@link ILfs#HIGH_CURVATURE}
+	 * ({@code -2});</li>
+	 * <li>valid IMAP value with {@link #curvature} at least
+	 * {@link LfsParams#getHighcurvCurvatureMin()}: {@link ILfs#HIGH_CURVATURE}; otherwise the IMAP
+	 * direction itself.</li>
+	 * </ul>
+	 *
+	 * @param oNMap               output NMAP; must be pre-allocated with one entry per block and is
+	 *                            filled in place
+	 * @param oInputBlockImageMap associated IMAP of directions
+	 * @param mappedImageWidth    width of the IMAP, in blocks
+	 * @param mappedImageHeight   height of the IMAP, in blocks
+	 * @param lfsParams           LFS parameters and thresholds
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion
+	 */
 	public int genNMap(AtomicIntegerArray oNMap, AtomicIntegerArray oInputBlockImageMap, final int mappedImageWidth,
 			final int mappedImageHeight, final LfsParams lfsParams) {
 		int nmapIndex;
@@ -2102,16 +2421,22 @@ public class Maps extends MindTct implements IMaps {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: vorticity - Measures the amount of cummulative curvature incurred #cat:
-	 * among the IMAP neighbors of the given block. Input: oInputBlockImageMap - 2D
-	 * vector of ridge flow directions mappedImageXIndex - horizontal coord of
-	 * current IMAP block mappedImageXIndex - vertical coord of current IMAP block
-	 * mappedImageWidth - width (in blocks) of the IMAP mappedImageHeight - height
-	 * (in blocks) of the IMAP nDirs - number of possible directions in the IMAP
-	 * Return Code: Non-negative - the measured vorticity among the neighbors
-	 **************************************************************************/
+	/**
+	 * Measures the cumulative curvature (vorticity) among the 8 neighbors of a block.
+	 *
+	 * Port of NIST {@code vorticity()}. The 8 neighbors are visited in circular order (NW, N, NE, E,
+	 * SE, S, SW, W and back to NW); for each adjacent pair the vorticity is accumulated with
+	 * {@link #accumulateNbrVorticity}. Neighbors outside the map count as INVALID and are ignored.
+	 *
+	 * @param oInputBlockImageMap 2D map of ridge-flow directions
+	 * @param mappedImageXIndex   block x-coordinate of the current block
+	 * @param mappedImageYIndex   block y-coordinate of the current block
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param nDirs               number of possible directions in the map (covering 180 degrees)
+	 * @return the accumulated vorticity measure among the neighbors (may be negative, as clockwise
+	 *         turns larger than 90 degrees decrement it)
+	 */
 	public int vorticity(AtomicIntegerArray oInputBlockImageMap, final int mappedImageXIndex,
 			final int mappedImageYIndex, final int mappedImageWidth, final int mappedImageHeight, final int nDirs) {
 		int eastIndex;
@@ -2227,14 +2552,20 @@ public class Maps extends MindTct implements IMaps {
 		return (oVorticityMeasure.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: accumulateNbrVorticity - Accumlates the amount of curvature measures
-	 * #cat: between neighboring IMAP blocks. Input: dir1 - first neighbor's integer
-	 * IMAP direction dir2 - second neighbor's integer IMAP direction nDirs - number
-	 * of possible IMAP directions Output: oVorticityMeasure - accumulated vorticity
-	 * among neighbors measured so far
-	 **************************************************************************/
+	/**
+	 * Accumulates the curvature contribution between two neighboring block directions.
+	 *
+	 * Port of NIST {@code accum_nbr_vorticity()}. If both directions are valid and different, the
+	 * clockwise distance from {@code dir1} to {@code dir2} is computed (wrapping modulo
+	 * {@code nDirs}). If it is larger than {@code nDirs / 2} (more than 90 degrees, since all
+	 * directions cover 180 degrees) the measure is decremented, otherwise it is incremented. Equal
+	 * or INVALID directions are ignored.
+	 *
+	 * @param oVorticityMeasure accumulated vorticity measure; updated in place
+	 * @param dir1              first neighbor's integer direction
+	 * @param dir2              second neighbor's integer direction
+	 * @param nDirs             number of possible directions
+	 */
 	public void accumulateNbrVorticity(AtomicInteger oVorticityMeasure, final int dir1, final int dir2,
 			final int nDirs) {
 		int dist;
@@ -2270,18 +2601,22 @@ public class Maps extends MindTct implements IMaps {
 		/* one or both directions are INVALID, so ignore. */
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: curvature - Measures the largest change in direction between the #cat:
-	 * current IMAP direction and its immediate neighbors. Input:
-	 * oInputBlockImageMap - 2D vector of ridge flow directions mappedImageXIndex -
-	 * horizontal coord of current IMAP block mappedImageYIndex - vertical coord of
-	 * current IMAP block mappedImageWidth - width (in blocks) of the IMAP
-	 * mappedImageHeight - height (in blocks) of the IMAP nDirs - number of possible
-	 * directions in the IMAP Return Code: Non-negative - maximum change in
-	 * direction found (curvature) Negative - No valid neighbor found to measure
-	 * change in direction
-	 **************************************************************************/
+	/**
+	 * Measures the largest change in direction between a block and its 8 immediate neighbors.
+	 *
+	 * Port of NIST {@code curvature()}. The closest circular distance
+	 * ({@link LfsUtil#closestDirDistance}) between the block's direction and each neighbor's is
+	 * computed; neighbors outside the map count as INVALID. The maximum distance is returned.
+	 *
+	 * @param oInputBlockImageMap 2D map of ridge-flow directions
+	 * @param mappedImageXIndex   block x-coordinate of the current block
+	 * @param mappedImageYIndex   block y-coordinate of the current block
+	 * @param mappedImageWidth    width of the map, in blocks
+	 * @param mappedImageHeight   height of the map, in blocks
+	 * @param nDirs               number of possible directions in the map (covering 180 degrees)
+	 * @return the maximum change in direction found (curvature, zero or positive), or a negative
+	 *         value ({@code -1}) if no valid neighbor was found to measure a change against
+	 */
 	public int curvature(AtomicIntegerArray oInputBlockImageMap, final int mappedImageXIndex,
 			final int mappedImageYIndex, final int mappedImageWidth, final int mappedImageHeight, final int nDirs) {
 		int nInputBlockImageMapIndexValue;
@@ -2431,50 +2766,110 @@ public class Maps extends MindTct implements IMaps {
 		return (nCurvatureMeasure);
 	}
 
+	/**
+	 * Returns the Direction Map (per-block direction or {@link ILfs#INVALID_DIR}).
+	 *
+	 * @return the Direction Map; may be {@code null} if not yet set
+	 */
 	public AtomicIntegerArray getDirectionMap() {
 		return directionMap;
 	}
 
+	/**
+	 * Sets the Direction Map (per-block direction or {@link ILfs#INVALID_DIR}).
+	 *
+	 * @param directionMap the new Direction Map
+	 */
 	public void setDirectionMap(AtomicIntegerArray directionMap) {
 		this.directionMap = directionMap;
 	}
 
+	/**
+	 * Returns the Low Contrast Map (per-block TRUE/FALSE flags).
+	 *
+	 * @return the Low Contrast Map; may be {@code null} if not yet set
+	 */
 	public AtomicIntegerArray getLowContrastMap() {
 		return lowContrastMap;
 	}
 
+	/**
+	 * Sets the Low Contrast Map (per-block TRUE/FALSE flags).
+	 *
+	 * @param lowContrastMap the new Low Contrast Map
+	 */
 	public void setLowContrastMap(AtomicIntegerArray lowContrastMap) {
 		this.lowContrastMap = lowContrastMap;
 	}
 
+	/**
+	 * Returns the Low Ridge Flow Map (per-block TRUE/FALSE flags).
+	 *
+	 * @return the Low Ridge Flow Map; may be {@code null} if not yet set
+	 */
 	public AtomicIntegerArray getLowFlowMap() {
 		return lowFlowMap;
 	}
 
+	/**
+	 * Sets the Low Ridge Flow Map (per-block TRUE/FALSE flags).
+	 *
+	 * @param lowFlowMap the new Low Ridge Flow Map
+	 */
 	public void setLowFlowMap(AtomicIntegerArray lowFlowMap) {
 		this.lowFlowMap = lowFlowMap;
 	}
 
+	/**
+	 * Returns the High Curvature Map (per-block TRUE/FALSE flags).
+	 *
+	 * @return the High Curvature Map; may be {@code null} if not yet set
+	 */
 	public AtomicIntegerArray getHighCurveMap() {
 		return highCurveMap;
 	}
 
+	/**
+	 * Sets the High Curvature Map (per-block TRUE/FALSE flags).
+	 *
+	 * @param highCurveMap the new High Curvature Map
+	 */
 	public void setHighCurveMap(AtomicIntegerArray highCurveMap) {
 		this.highCurveMap = highCurveMap;
 	}
 
+	/**
+	 * Returns the width of the maps, in blocks.
+	 *
+	 * @return the width of the maps, in blocks; may be {@code null} if not yet set
+	 */
 	public AtomicInteger getMappedImageWidth() {
 		return mappedImageWidth;
 	}
 
+	/**
+	 * Sets the width of the maps, in blocks.
+	 *
+	 * @param mappedImageWidth the new width of the maps, in blocks
+	 */
 	public void setMappedImageWidth(AtomicInteger mappedImageWidth) {
 		this.mappedImageWidth = mappedImageWidth;
 	}
 
+	/**
+	 * Returns the height of the maps, in blocks.
+	 *
+	 * @return the height of the maps, in blocks; may be {@code null} if not yet set
+	 */
 	public AtomicInteger getMappedImageHeight() {
 		return mappedImageHeight;
 	}
 
+	/**
+	 * Sets the height of the maps, in blocks.
+	 *
+	 * @param mappedImageHeight the new height of the maps, in blocks
+	 */
 	public void setMappedImageHeight(AtomicInteger mappedImageHeight) {
 		this.mappedImageHeight = mappedImageHeight;
 	}

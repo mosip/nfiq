@@ -300,4 +300,168 @@ class MlpClaTest {
         result = mlpCla.sgemV(trans, 1, 1, alpha, a, 1, x, 1, beta, y, 1);
         assertEquals(0, result);
     }
+
+    /**
+     * Builds an AtomicReferenceArray holding the given values.
+     */
+    private AtomicReferenceArray<Double> arrayOf(double... values) {
+        AtomicReferenceArray<Double> array = new AtomicReferenceArray<>(values.length);
+        for (int i = 0; i < values.length; i++) {
+            array.set(i, values[i]);
+        }
+        return array;
+    }
+
+    /**
+     * Column-major 2x3 matrix [[1,2,3],[4,5,6]] used by the numeric sgemV tests.
+     */
+    private AtomicReferenceArray<Double> matrix2x3() {
+        return arrayOf(1, 4, 2, 5, 3, 6);
+    }
+
+    /**
+     * Validates y := alpha*A*x + beta*y with a lower-case 'n' operation code, confirming the
+     * case-insensitive comparison and the exact numeric result.
+     */
+    @Test
+    void sgemVLowerCaseNoTransposeComputesExpectedVector() {
+        AtomicReferenceArray<Double> y = arrayOf(1, 1);
+
+        mlpCla.sgemV(new AtomicReference<>('n'), 2, 3, new AtomicReference<>(2.0), matrix2x3(), 2,
+                arrayOf(1, 1, 1), 1, new AtomicReference<>(3.0), y, 1);
+
+        assertEquals(15.0, y.get(0), 1e-12);
+        assertEquals(33.0, y.get(1), 1e-12);
+    }
+
+    /**
+     * Validates negative increments for x and y together with beta = 0: the vectors are
+     * traversed backwards and y is cleared before accumulation.
+     */
+    @Test
+    void sgemVNegativeIncrementsTraverseVectorsBackwards() {
+        AtomicReferenceArray<Double> y = arrayOf(99, 99);
+
+        mlpCla.sgemV(new AtomicReference<>('N'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                arrayOf(1, 2, 3), -1, new AtomicReference<>(0.0), y, -1);
+
+        assertEquals(28.0, y.get(0), 1e-12);
+        assertEquals(10.0, y.get(1), 1e-12);
+    }
+
+    /**
+     * Validates a non-unit y increment with a non-zero beta and a zero x element: the zero
+     * column is skipped and only every second y element is updated.
+     */
+    @Test
+    void sgemVStridedYSkipsZeroColumns() {
+        AtomicReferenceArray<Double> y = arrayOf(1, 7, 1);
+
+        mlpCla.sgemV(new AtomicReference<>('N'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                arrayOf(1, 0, 1), 1, new AtomicReference<>(2.0), y, 2);
+
+        assertEquals(2.0 + 4.0, y.get(0), 1e-12);
+        assertEquals(7.0, y.get(1), 1e-12);
+        assertEquals(2.0 + 10.0, y.get(2), 1e-12);
+    }
+
+    /**
+     * Validates a strided y with beta = 0 clears the addressed elements before accumulation.
+     */
+    @Test
+    void sgemVStridedYWithZeroBetaClearsTargets() {
+        AtomicReferenceArray<Double> y = arrayOf(50, 7, 50);
+
+        mlpCla.sgemV(new AtomicReference<>('N'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                arrayOf(1, 1, 1), 1, new AtomicReference<>(0.0), y, 2);
+
+        assertEquals(6.0, y.get(0), 1e-12);
+        assertEquals(7.0, y.get(1), 1e-12);
+        assertEquals(15.0, y.get(2), 1e-12);
+    }
+
+    /**
+     * Validates that alpha = 0 with beta != 1 only scales y and returns before the product.
+     */
+    @Test
+    void sgemVZeroAlphaOnlyScalesY() {
+        AtomicReferenceArray<Double> y = arrayOf(2, 4);
+
+        int result = mlpCla.sgemV(new AtomicReference<>('N'), 2, 3, new AtomicReference<>(0.0), matrix2x3(), 2,
+                arrayOf(1, 1, 1), 1, new AtomicReference<>(0.5), y, 1);
+
+        assertEquals(0, result);
+        assertEquals(1.0, y.get(0), 1e-12);
+        assertEquals(2.0, y.get(1), 1e-12);
+    }
+
+    /**
+     * Validates y := alpha*A'*x + beta*y for the transpose operation with beta = 0.
+     */
+    @Test
+    void sgemVTransposeComputesExpectedVector() {
+        AtomicReferenceArray<Double> y = arrayOf(9, 9, 9);
+
+        mlpCla.sgemV(new AtomicReference<>('t'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                arrayOf(1, 1), 1, new AtomicReference<>(0.0), y, 1);
+
+        assertEquals(5.0, y.get(0), 1e-12);
+        assertEquals(7.0, y.get(1), 1e-12);
+        assertEquals(9.0, y.get(2), 1e-12);
+    }
+
+    /**
+     * Validates the transpose operation with a negative x increment, which reverses x.
+     */
+    @Test
+    void sgemVTransposeNegativeIncrementReversesX() {
+        AtomicReferenceArray<Double> y = arrayOf(0, 0, 0);
+
+        mlpCla.sgemV(new AtomicReference<>('T'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                arrayOf(1, 2), -1, new AtomicReference<>(1.0), y, 1);
+
+        assertEquals(1 * 2 + 4 * 1, y.get(0), 1e-12);
+        assertEquals(2 * 2 + 5 * 1, y.get(1), 1e-12);
+        assertEquals(3 * 2 + 6 * 1, y.get(2), 1e-12);
+    }
+
+    /**
+     * Validates that illegal operation characters (including non-letters above 'z') and
+     * invalid dimensions leave y untouched.
+     */
+    @Test
+    void sgemVIllegalArgumentsLeaveYUnchanged() {
+        char[] illegal = {'{', 'x', 'A', '1'};
+        for (char c : illegal) {
+            AtomicReferenceArray<Double> y = arrayOf(3, 4);
+            int result = mlpCla.sgemV(new AtomicReference<>(c), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 2,
+                    arrayOf(1, 1, 1), 1, new AtomicReference<>(0.0), y, 1);
+            assertEquals(0, result);
+            assertEquals(3.0, y.get(0), 0.0);
+            assertEquals(4.0, y.get(1), 0.0);
+        }
+
+        AtomicReferenceArray<Double> y = arrayOf(3, 4);
+        mlpCla.sgemV(new AtomicReference<>('N'), 2, 3, new AtomicReference<>(1.0), matrix2x3(), 1,
+                arrayOf(1, 1, 1), 1, new AtomicReference<>(0.0), y, 1);
+        assertEquals(3.0, y.get(0), 0.0);
+        assertEquals(4.0, y.get(1), 0.0);
+    }
+
+    /**
+     * Validates that the mlpSgemV wrapper unwraps its AtomicInteger increments and delegates
+     * to sgemV, producing the same numeric result.
+     */
+    @Test
+    void mlpSgemVDelegatesWithUnwrappedIncrements() {
+        AtomicReferenceArray<Double> y = arrayOf(0, 0, 0);
+
+        int result = mlpCla.mlpSgemV(new AtomicReference<>('t'), 2, 3, new AtomicReference<>(2.0), matrix2x3(), 2,
+                arrayOf(1, 1), new AtomicInteger(1), new AtomicReference<>(1.0), y, new AtomicInteger(1));
+
+        assertEquals(0, result);
+        assertEquals(10.0, y.get(0), 1e-12);
+        assertEquals(14.0, y.get(1), 1e-12);
+        assertEquals(18.0, y.get(2), 1e-12);
+    }
 }

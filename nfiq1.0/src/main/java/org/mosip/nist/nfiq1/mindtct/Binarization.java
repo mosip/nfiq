@@ -12,15 +12,37 @@ import org.mosip.nist.nfiq1.common.ILfs.RotGrids;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Turns a grayscale fingerprint image into a black/white image, pixel by pixel, guided by the ridge-flow
+ * direction map (MINDTCT binarization stage).
+ * <p>
+ * Port of NIST LFS {@code binar.c} ({@code binarize}, {@code binarize_V2}, {@code binarize_image},
+ * {@code binarize_image_V2}, {@code dirbinarize}, {@code isobinarize}). In a block with a valid ridge
+ * direction, each pixel is binarized by comparing the center row of a rotated grid aligned with the ridge flow
+ * against the whole grid. The V1 NMAP path uses isotropic (neighborhood-average) binarization for invalid or
+ * high-curvature blocks. The binary image produced here is what minutiae detection scans.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized and the class keeps no mutable state.
+ */
 public class Binarization extends MindTct implements IBinarization {
+	/** SLF4J logger for allocation errors. */
 	private static final Logger logger = LoggerFactory.getLogger(Binarization.class);
 
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static Binarization instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private Binarization() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code Binarization} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized Binarization getInstance() {
 		if (instance == null) {
 			instance = new Binarization();
@@ -28,30 +50,44 @@ public class Binarization extends MindTct implements IBinarization {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared numeric-definitions helper (rounding and precision truncation).
+	 *
+	 * @return the {@link Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the MINDTCT image utility helper, used here to fill holes in the binary image.
+	 *
+	 * @return the {@link ImageUtil} singleton (MINDTCT package version)
+	 */
 	public ImageUtil getImageUtil() {
 		return ImageUtil.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: binarize - Takes a padded grayscale input image and its associated
-	 * ridge #cat: direction flow NMAP and produces a binarized version of the #cat:
-	 * image. It then fills horizontal and vertical "holes" in the #cat: binary
-	 * image results. Input: paddedImageData - padded input grayscale image
-	 * paddedImageWidth - padded width (in pixels) of input image paddedImageHeight
-	 * - padded height (in pixels) of input image mapDirectionArr - 2-D vector of
-	 * IMAP directions and other codes mappedImageWidth - width (in blocks) of the
-	 * NMAP mappedImageHeight - height (in blocks) of the NMAP dirBinGrids - set of
-	 * rotated grid offsets used for directional binarization lfsParms - parameters
-	 * and thresholds for controlling LFS Output: ret - Zero - successful completion
-	 * -Negative - system error oBinarizedWidth - width of binary image
-	 * oBinarizedHeight - height of binary image Return Code: binarizedImageData -
-	 * points to created (unpadded) binary image
-	 **************************************************************************/
+	/**
+	 * Binarizes a padded grayscale image using its NMAP, then fills holes (NIST {@code binarize}).
+	 * <p>
+	 * Takes a padded grayscale input image and its ridge-flow direction NMAP and produces a binarized version
+	 * of the image with {@link #binarizeImage}. It then fills horizontal and vertical "holes" in the binary
+	 * image, repeating {@code lfsParms.getNumFillHoles()} times (3 in LFS).
+	 *
+	 * @param ret               output: 0 ({@link ILfs#FALSE}) on success; negative on system error
+	 * @param oBinarizedWidth   output: width (in pixels) of the binary image
+	 * @param oBinarizedHeight  output: height (in pixels) of the binary image
+	 * @param paddedImageData   padded input grayscale image
+	 * @param paddedImageWidth  padded width (in pixels) of the input image
+	 * @param paddedImageHeight padded height (in pixels) of the input image
+	 * @param mapDirectionArr   2-D vector (row-major) of IMAP directions and other NMAP codes
+	 * @param mappedImageWidth  width (in blocks) of the NMAP
+	 * @param mappedImageHeight height (in blocks) of the NMAP
+	 * @param dirBinGrids       set of rotated grid offsets used for directional binarization
+	 * @param lfsParms          parameters and thresholds that control LFS
+	 * @return the new (unpadded) binary image, or an empty array on error
+	 */
 	public int[] binarize(AtomicInteger ret, AtomicInteger oBinarizedWidth, AtomicInteger oBinarizedHeight,
 			int[] paddedImageData, final int paddedImageWidth, final int paddedImageHeight,
 			AtomicIntegerArray mapDirectionArr, final int mappedImageWidth, final int mappedImageHeight,
@@ -82,24 +118,27 @@ public class Binarization extends MindTct implements IBinarization {
 		return binarizedImageData;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: binarizeV2 - Takes a padded grayscale input image and its associated
-	 * #cat: Direction Map and produces a binarized version of the #cat: image. It
-	 * then fills horizontal and vertical "holes" in #cat: the binary image results.
-	 * Note that the input image must #cat: be padded sufficiently to contain in
-	 * memory rotated #cat: directional binarization grids applied to pixels along
-	 * the #cat: perimeter of the input image. Input: paddedImageData - padded input
-	 * grayscale image paddedImageWidth - padded width (in pixels) of input image
-	 * paddedImageHeight - padded height (in pixels) of input image directionMap -
-	 * 2-D vector of discrete ridge flow directions mappedImageWidth - width (in
-	 * blocks) of the map mappedImageHeight - height (in blocks) of the map
-	 * dirBinGrids - set of rotated grid offsets used for directional binarization
-	 * lfsParms - parameters and thresholds for controlling LFS Output: ret - Zero -
-	 * successful completion -Negative - system error oBinarizedWidth - width of
-	 * binary image oBinarizedHeight - height of binary image Return Code:
-	 * binarizedImageData - points to created (unpadded) binary image
-	 **************************************************************************/
+	/**
+	 * Binarizes a padded grayscale image using its Direction Map, then fills holes (NIST {@code binarize_V2}).
+	 * <p>
+	 * Takes a padded grayscale input image and its Direction Map and produces a binarized version of the
+	 * image with {@link #binarizeImageV2}. It then fills horizontal and vertical "holes" in the binary image,
+	 * repeating {@code lfsParms.getNumFillHoles()} times. The input image must be padded enough to hold the
+	 * rotated directional binarization grids applied to pixels along its perimeter.
+	 *
+	 * @param ret               output: 0 ({@link ILfs#FALSE}) on success; negative on system error
+	 * @param oBinarizedWidth   output: width (in pixels) of the binary image
+	 * @param oBinarizedHeight  output: height (in pixels) of the binary image
+	 * @param paddedImageData   padded input grayscale image
+	 * @param paddedImageWidth  padded width (in pixels) of the input image
+	 * @param paddedImageHeight padded height (in pixels) of the input image
+	 * @param directionMap      2-D vector (row-major) of discrete ridge-flow directions
+	 * @param mappedImageWidth  width (in blocks) of the map
+	 * @param mappedImageHeight height (in blocks) of the map
+	 * @param dirBinGrids       set of rotated grid offsets used for directional binarization
+	 * @param lfsParms          parameters and thresholds that control LFS
+	 * @return the new (unpadded) binary image, or an empty array on error
+	 */
 	public int[] binarizeV2(AtomicInteger ret, AtomicInteger oBinarizedWidth, AtomicInteger oBinarizedHeight,
 			int[] paddedImageData, final int paddedImageWidth, final int paddedImageHeight,
 			AtomicIntegerArray directionMap, final int mappedImageWidth, final int mappedImageHeight,
@@ -129,22 +168,29 @@ public class Binarization extends MindTct implements IBinarization {
 		return binarizeImagedata;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: binarize_image - Takes a grayscale input image and its associated #cat:
-	 * NMAP and generates a binarized version of the image. Input: paddedImageData -
-	 * padded input grayscale image paddedImageWidth - padded width (in pixels) of
-	 * input image paddedImageHeight - padded height (in pixels) of input image
-	 * mapDirectionArr - 2-D vector of IMAP directions and other codes
-	 * mappedImageWidth - width (in blocks) of the NMAP mappedImageHeight - height
-	 * (in blocks) of the NMAP imapBlockSize - dimension (in pixels) of each NMAP
-	 * block dirBinGrids - set of rotated grid offsets used for directional
-	 * binarization isoBinGridDim - dimension (in pixels) of grid used for isotropic
-	 * binarization Output: ret - Zero - successful completion - Negative - system
-	 * error oBinarizedWidth - points to binary image width oBinarizedHeight -
-	 * points to binary image height Return Code: binarizedImageData - points to
-	 * binary image results
-	 **************************************************************************/
+	/**
+	 * Generates a binary image from a padded grayscale image and its NMAP (NIST {@code binarize_image}).
+	 * <p>
+	 * For each pixel of the unpadded region, looks up the NMAP value of its block. Blocks with
+	 * {@link ILfs#NO_VALID_NBRS} become white ({@link ILfs#WHITE_PIXEL}). Blocks with a valid direction
+	 * ({@code >= 0}) use {@link #dirbinarize}. INVALID or HIGH-CURVATURE blocks use {@link #isoBinarize}. The
+	 * output is {@code 2 * pad} pixels smaller than the input in each dimension.
+	 *
+	 * @param ret               output: 0 ({@link ILfs#FALSE}) on success; {@link ILfs#ERROR_CODE_110} if
+	 *                          allocation fails
+	 * @param oBinarizedWidth   output: binary image width (in pixels)
+	 * @param oBinarizedHeight  output: binary image height (in pixels)
+	 * @param paddedImageData   padded input grayscale image
+	 * @param paddedImageWidth  padded width (in pixels) of the input image
+	 * @param paddedImageHeight padded height (in pixels) of the input image
+	 * @param mapDirectionArr   2-D vector (row-major) of IMAP directions and other NMAP codes
+	 * @param mappedImageWidth  width (in blocks) of the NMAP
+	 * @param mappedImageHeight height (in blocks) of the NMAP
+	 * @param imapBlockSize     dimension (in pixels) of each NMAP block
+	 * @param dirBinGrids       set of rotated grid offsets used for directional binarization
+	 * @param isoBinGridDim     dimension (in pixels) of the grid used for isotropic binarization
+	 * @return the binary image, or an empty array on error
+	 */
 	@SuppressWarnings("unused")
 	public int[] binarizeImage(AtomicInteger ret, AtomicInteger oBinarizedWidth, AtomicInteger oBinarizedHeight,
 			int[] paddedImageData, final int paddedImageWidth, final int paddedImageHeight,
@@ -213,22 +259,27 @@ public class Binarization extends MindTct implements IBinarization {
 		return binarizedImageData;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: binarizeImageV2 - Takes a grayscale input image and its associated
-	 * #cat: Direction Map and generates a binarized version of the #cat: image.
-	 * Note that there is no "Isotropic" binarization #cat: used in this version.
-	 * Input: paddedImageData - padded input grayscale image paddedImageWidth -
-	 * padded width (in pixels) of input image paddedImageHeight - padded height (in
-	 * pixels) of input image directionMap - 2-D vector of discrete ridge flow
-	 * directions mappedImageWidth - width (in blocks) of the map mappedImageHeight
-	 * - height (in blocks) of the map blocksize - dimension (in pixels) of each
-	 * NMAP block dirBinGrids - set of rotated grid offsets used for directional
-	 * binarization Output: ret - Zero - successful completion - Negative - system
-	 * error oBinarizedWidth - points to binary image width oBinarizedHeight -
-	 * points to binary image height Return Code: binarizedImageData - points to
-	 * binary image results
-	 **************************************************************************/
+	/**
+	 * Generates a binary image from a padded grayscale image and its Direction Map (NIST
+	 * {@code binarize_image_V2}).
+	 * <p>
+	 * This version uses no "isotropic" binarization. Pixels in blocks whose direction is
+	 * {@link ILfs#INVALID_DIR} become white ({@link ILfs#WHITE_PIXEL}); all others use {@link #dirbinarize}.
+	 * The output is {@code 2 * pad} pixels smaller than the input in each dimension.
+	 *
+	 * @param ret               output: always 0 ({@link ILfs#FALSE}) in this implementation
+	 * @param oBinarizedWidth   output: binary image width (in pixels)
+	 * @param oBinarizedHeight  output: binary image height (in pixels)
+	 * @param paddedImageData   padded input grayscale image
+	 * @param paddedImageWidth  padded width (in pixels) of the input image
+	 * @param paddedImageHeight padded height (in pixels) of the input image
+	 * @param directionMap      2-D vector (row-major) of discrete ridge-flow directions
+	 * @param mappedImageWidth  width (in blocks) of the map
+	 * @param mappedImageHeight height (in blocks) of the map
+	 * @param blocksize         dimension (in pixels) of each map block
+	 * @param dirBinGrids       set of rotated grid offsets used for directional binarization
+	 * @return the binary image
+	 */
 	public int[] binarizeImageV2(AtomicInteger ret, AtomicInteger oBinarizedWidth, AtomicInteger oBinarizedHeight,
 			int[] paddedImageData, final int paddedImageWidth, final int paddedImageHeight,
 			AtomicIntegerArray directionMap, final int mappedImageWidth, final int mappedImageHeight,
@@ -287,18 +338,23 @@ public class Binarization extends MindTct implements IBinarization {
 		return binarizedImageData;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dirbinarize - Determines the binary value of a grayscale pixel based
-	 * #cat: on a VALID IMAP ridge flow direction. CAUTION: The image to which the
-	 * input pixel points must be appropriately padded to account for the radius of
-	 * the rotated grid. Otherwise, this routine may access "unkown" memory. Input:
-	 * paddedImageData - pointer to current grayscale pixel paddedImageIndex -
-	 * pointer to current grayscale pixel imapDirection - IMAP integer direction
-	 * associated with the block the current is in dirBinGrids - set of precomputed
-	 * rotated grid offsets Return Code: BLACK_PIXEL - pixel intensity for BLACK
-	 * WHITE_PIXEL - pixel intensity of WHITE
-	 **************************************************************************/
+	/**
+	 * Determines the binary value of a grayscale pixel from a VALID IMAP ridge-flow direction (NIST
+	 * {@code dirbinarize}).
+	 * <p>
+	 * Sums the pixels of the rotated grid for {@code imapDirection}, centered on the current pixel, and
+	 * separately keeps the sum of the grid's center row. If the center-row sum, treated as an average (times
+	 * the grid height), is less than the total grid sum, the pixel is black; otherwise it is white.
+	 * <p>
+	 * CAUTION: the image must be padded enough to cover the radius of the rotated grid; otherwise out-of-range
+	 * indexes are accessed.
+	 *
+	 * @param paddedImageData  the padded grayscale image
+	 * @param paddedImageIndex index of the current grayscale pixel in {@code paddedImageData}
+	 * @param imapDirection    IMAP integer direction of the block the current pixel is in
+	 * @param dirBinGrids      set of precomputed rotated grid offsets
+	 * @return {@link ILfs#BLACK_PIXEL} (black pixel intensity) or {@link ILfs#WHITE_PIXEL} (white pixel intensity)
+	 */
 	public int dirbinarize(int[] paddedImageData, final int paddedImageIndex, final int imapDirection,
 			final RotGrids dirBinGrids) {
 		int gx;
@@ -354,24 +410,24 @@ public class Binarization extends MindTct implements IBinarization {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: isoBinarize - Determines the binary value of a grayscale pixel based
-	 * #cat: on comparing the grayscale value with a surrounding #cat: neighborhood
-	 * grid of pixels. If the current pixel (treated #cat: as an average) is less
-	 * than the sum of the pixels in #cat: the neighborhood, then the binary value
-	 * is set to BLACK, #cat: otherwise it is set to WHITE. This binarization
-	 * technique #cat: is used when there is no VALID IMAP direction for the #cat:
-	 * block in which the current pixel resides. CAUTION: The image to which the
-	 * input pixel points must be appropriately padded to account for the radius of
-	 * the neighborhood. Otherwise, this routine may access "unkown" memory. Input:
-	 * paddedImageData - pointer to curent grayscale pixel paddedImageIndex -
-	 * pointer to current grayscale pixel paddedImageWidth - padded width (in
-	 * pixels) of the grayscale image paddedImageHeight - padded height (in pixels)
-	 * of the grayscale image isoBinGridDim - dimension (in pixels) of the
-	 * neighborhood Return Code: BLACK_PIXEL - pixel intensity for BLACK WHITE_PIXEL
-	 * - pixel intensity of WHITE
-	 **************************************************************************/
+	/**
+	 * Determines the binary value of a grayscale pixel by comparing it with its square neighborhood (NIST
+	 * {@code isobinarize}).
+	 * <p>
+	 * If the current pixel, treated as an average (times the number of grid pixels), is less than the sum of
+	 * the pixels in the {@code isoBinGridDim x isoBinGridDim} neighborhood centered on it, the pixel is black;
+	 * otherwise it is white. This technique is used when the pixel's block has no VALID IMAP direction.
+	 * <p>
+	 * CAUTION: the image must be padded enough to cover the radius of the neighborhood; otherwise out-of-range
+	 * indexes are accessed.
+	 *
+	 * @param paddedImageData   the padded grayscale image
+	 * @param paddedImageIndex  index of the current grayscale pixel in {@code paddedImageData}
+	 * @param paddedImageWidth  padded width (in pixels) of the grayscale image
+	 * @param paddedImageHeight padded height (in pixels) of the grayscale image
+	 * @param isoBinGridDim     dimension (in pixels) of the square neighborhood
+	 * @return {@link ILfs#BLACK_PIXEL} (black pixel intensity) or {@link ILfs#WHITE_PIXEL} (white pixel intensity)
+	 */
 	public int isoBinarize(int[] paddedImageData, final int paddedImageIndex, final int paddedImageWidth,
 			final int paddedImageHeight, final int isoBinGridDim) {
 		int currentPaddedImageIndex;

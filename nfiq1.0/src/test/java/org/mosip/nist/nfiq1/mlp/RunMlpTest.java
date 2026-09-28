@@ -21,6 +21,12 @@ import org.mosip.nist.nfiq1.common.IMlp;
 import org.mosip.nist.nfiq1.mindtct.Free;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 
 /**
  * Complete test class for RunMlp
@@ -87,21 +93,33 @@ class RunMlpTest {
     }
 
     /**
-     * Tests runMlp method variable initialization before failure.
+     * Verifies runMlp2 reports the index of the most strongly activated output node, including
+     * cases where the maximum is not reached by consecutive improvements.
      */
     @Test
-    void runMlpVariableInitialization() {
-        int nInps = 1, nHids = 1, nOuts = 1;
-        AtomicReferenceArray<Double> weights = createMinimalWeightsArray(20);
-        double[] featureVector = {1.0};
-        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
-        AtomicInteger hypClass = new AtomicInteger();
-        AtomicReference<Double> confidence = new AtomicReference<>();
+    void runMlp2HypClassIsIndexOfMaximumActivation() {
+        double[][] biases = {{0.5, 0.1, 0.9}, {0.9, 0.1, 0.5}, {0.1, 0.9, 0.5}, {0.1, 0.5, 0.3, 0.9},
+                {0.2, 0.8, 0.4, 0.6, 0.1}};
+        int[] expectedClass = {2, 0, 1, 3, 1};
+        for (int t = 0; t < biases.length; t++) {
+            int nOuts = biases[t].length;
+            // 1 input, 1 hidden node with zero weight/bias, so each output equals its bias (then 0.25x).
+            AtomicReferenceArray<Double> weights = new AtomicReferenceArray<>(2 + 2 * nOuts);
+            for (int i = 0; i < weights.length(); i++) {
+                weights.set(i, 0.0);
+            }
+            for (int o = 0; o < nOuts; o++) {
+                weights.set(2 + nOuts + o, biases[t][o]);
+            }
+            AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
+            AtomicInteger hypClass = new AtomicInteger(-1);
+            AtomicReference<Double> confidence = new AtomicReference<>();
 
-        assertThrows(Exception.class, () -> {
-            runMlp.runMlp(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
-                    weights, featureVector, outAcs, hypClass, confidence);
-        });
+            assertEquals(0, runMlp.runMlp2(1, 1, nOuts, IMlp.LINEAR, IMlp.LINEAR, weights, new double[] {1.0},
+                    outAcs, hypClass, confidence));
+            assertEquals(expectedClass[t], hypClass.get(), "case " + t);
+            assertEquals(outAcs.get(expectedClass[t]), confidence.get(), DELTA);
+        }
     }
 
     /**
@@ -427,98 +445,45 @@ class RunMlpTest {
     }
 
     /**
-     * Tests runMlp method with valid parameters to verify initialization.
+     * Verifies runMlp produces the same activations, class and confidence as runMlp2.
      */
     @Test
-    void runMlpWithValidParameters() {
-        int nInps = 1, nHids = 1, nOuts = 1;
-        AtomicReferenceArray<Double> weights = new AtomicReferenceArray<>(10);
-
-        for (int i = 0; i < 10; i++) {
-            weights.set(i, 0.1);
-        }
-
-        double[] featureVector = {1.0};
-        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
-        AtomicInteger hypClass = new AtomicInteger();
-        AtomicReference<Double> confidence = new AtomicReference<>();
-
-        assertThrows(NullPointerException.class, () -> {
-            runMlp.runMlp(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
-                    weights, featureVector, outAcs, hypClass, confidence);
-        });
-    }
-
-    /**
-     * Documents the flawed weight array structure in runMlp method.
-     */
-    @Test
-    void runMlpWeightArrayFlawedStructure() {
-        int nInps = 2, nHids = 2, nOuts = 2;
-        AtomicReferenceArray<Double> weights = new AtomicReferenceArray<>(20);
-
-        for (int i = 0; i < 20; i++) {
-            weights.set(i, 0.5);
-        }
-
-        double[] featureVector = {1.0, 2.0};
-        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
-        AtomicInteger hypClass = new AtomicInteger();
-        AtomicReference<Double> confidence = new AtomicReference<>();
-
-        Exception exception = assertThrows(NullPointerException.class, () -> {
-            runMlp.runMlp(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
-                    weights, featureVector, outAcs, hypClass, confidence);
-        });
-
-        assertTrue(exception.getMessage().contains("Cannot invoke \"java.lang.Double.doubleValue()\""));
-    }
-
-    /**
-     * Tests runMlp method variable initialization only.
-     */
-    @Test
-    void runMlpVariableInitializationOnly() {
-        int nInps = 1, nHids = 1, nOuts = 1;
-
-        assertTrue(nHids <= IMlp.MAX_NHIDS, "Should pass the MAX_NHIDS check");
-
-        AtomicReferenceArray<Double> weights = new AtomicReferenceArray<>(5);
-        for (int i = 0; i < 5; i++) {
-            weights.set(i, 0.1);
-        }
-
-        double[] featureVector = {1.0};
-        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
-        AtomicInteger hypClass = new AtomicInteger();
-        AtomicReference<Double> confidence = new AtomicReference<>();
-
-        assertThrows(NullPointerException.class, () -> {
-            runMlp.runMlp(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
-                    weights, featureVector, outAcs, hypClass, confidence);
-        });
-    }
-
-    /**
-     * Compares runMlp and runMlp2 method behaviors.
-     */
-    @Test
-    void runMlpComparisonWithRunMlp2() {
+    void runMlpMatchesRunMlp2() {
         int nInps = 2, nHids = 2, nOuts = 2;
         AtomicReferenceArray<Double> weights = createProperWeightsArray(nInps, nHids, nOuts);
         double[] featureVector = {1.0, 1.0};
+        AtomicReferenceArray<Double> outAcs2 = new AtomicReferenceArray<>(nOuts);
+        AtomicInteger hypClass2 = new AtomicInteger();
+        AtomicReference<Double> confidence2 = new AtomicReference<>();
+        assertEquals(0, runMlp.runMlp2(nInps, nHids, nOuts, IMlp.SIGMOID, IMlp.SINUSOID,
+                weights, featureVector, outAcs2, hypClass2, confidence2));
+
         AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(nOuts);
         AtomicInteger hypClass = new AtomicInteger();
         AtomicReference<Double> confidence = new AtomicReference<>();
-
-        int result = runMlp.runMlp2(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
+        runMlp.runMlp(nInps, nHids, nOuts, IMlp.SIGMOID, IMlp.SINUSOID,
                 weights, featureVector, outAcs, hypClass, confidence);
-        assertEquals(0, result);
 
-        assertThrows(NullPointerException.class, () -> {
-            runMlp.runMlp(nInps, nHids, nOuts, IMlp.LINEAR, IMlp.LINEAR,
-                    weights, featureVector, outAcs, hypClass, confidence);
-        });
+        assertEquals(hypClass2.get(), hypClass.get());
+        assertEquals(confidence2.get(), confidence.get(), DELTA);
+        for (int i = 0; i < nOuts; i++) {
+            assertEquals(outAcs2.get(i), outAcs.get(i), DELTA);
+        }
+    }
+
+    /**
+     * Verifies runMlp throws instead of exiting the JVM when the network is invalid.
+     */
+    @Test
+    void runMlpThrowsOnInvalidNetwork() {
+        AtomicReferenceArray<Double> weights = createProperWeightsArray(1, 1, 1);
+        assertThrows(IllegalArgumentException.class, () -> runMlp.runMlp(1, IMlp.MAX_NHIDS + 1, 1, IMlp.LINEAR,
+                IMlp.LINEAR, weights, new double[] {1.0}, new AtomicReferenceArray<>(1), new AtomicInteger(),
+                new AtomicReference<>()));
+        assertThrows(IllegalArgumentException.class, () -> runMlp.runMlp(1, 1, 1, 'x', IMlp.LINEAR, weights,
+                new double[] {1.0}, new AtomicReferenceArray<>(1), new AtomicInteger(), new AtomicReference<>()));
+        assertThrows(IllegalArgumentException.class, () -> runMlp.runMlp(1, 1, 1, IMlp.LINEAR, 'x', weights,
+                new double[] {1.0}, new AtomicReferenceArray<>(1), new AtomicInteger(), new AtomicReference<>()));
     }
 
     /**
@@ -641,6 +606,72 @@ class RunMlpTest {
 
         assertEquals(0, result);
         assertNotNull(confidence.get());
+    }
+
+    /**
+     * Creates a spy of the RunMlp singleton whose MlpCla fills every output activation of
+     * each matrix-vector call with {@code fillValue}; the arrays passed to each call are
+     * recorded in {@code captured} (call order).
+     */
+    private RunMlp spyWithFillingMlpCla(double fillValue, java.util.List<AtomicReferenceArray<Double>> captured) {
+        MlpCla mlpCla = mock(MlpCla.class);
+        doAnswer(invocation -> {
+            AtomicReferenceArray<Double> y = invocation.getArgument(9);
+            for (int i = 0; i < y.length(); i++) {
+                y.set(i, fillValue);
+            }
+            captured.add(y);
+            return 0;
+        }).when(mlpCla).mlpSgemV(any(), anyInt(), anyInt(), any(), any(), anyInt(), any(), any(), any(), any(),
+                any());
+        RunMlp spyRunMlp = spy(RunMlp.getInstance());
+        doReturn(mlpCla).when(spyRunMlp).getMlpCla();
+        return spyRunMlp;
+    }
+
+    /**
+     * Verifies runMlp with zero hidden and output nodes completes and reports the first output
+     * activation as confidence with hypothetical class 0.
+     */
+    @Test
+    void runMlpWithoutHiddenOrOutputNodesReportsFirstActivation() {
+        java.util.List<AtomicReferenceArray<Double>> captured = new java.util.ArrayList<>();
+        RunMlp spyRunMlp = spyWithFillingMlpCla(3.0, captured);
+        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(1);
+        AtomicInteger hypClass = new AtomicInteger(-1);
+        AtomicReference<Double> confidence = new AtomicReference<>();
+
+        spyRunMlp.runMlp(1, 0, 0, IMlp.LINEAR, IMlp.LINEAR, createMinimalWeightsArray(4), new double[] {1.0},
+                outAcs, hypClass, confidence);
+
+        assertEquals(2, captured.size());
+        assertSame(outAcs, captured.get(1));
+        assertEquals(0, hypClass.get());
+        assertEquals(3.0, confidence.get(), DELTA);
+    }
+
+    /**
+     * Verifies runMlp2 with linear activations computes the exact output activations,
+     * hypothetical class and confidence for hand-computed weights.
+     */
+    @Test
+    void runMlp2LinearNetworkComputesExactOutputs() {
+        // 2 inputs, 1 hidden, 2 outputs: w1 = {1, 2}, b1 = {1}, w2 = {1, 3}, b2 = {0, 1}
+        AtomicReferenceArray<Double> weights = new AtomicReferenceArray<>(new Double[] {1.0, 2.0, 1.0, 1.0, 3.0,
+                0.0, 1.0});
+        AtomicReferenceArray<Double> outAcs = new AtomicReferenceArray<>(2);
+        AtomicInteger hypClass = new AtomicInteger(-1);
+        AtomicReference<Double> confidence = new AtomicReference<>();
+
+        int result = runMlp.runMlp2(2, 1, 2, IMlp.LINEAR, IMlp.LINEAR, weights, new double[] {1.0, 1.0}, outAcs,
+                hypClass, confidence);
+
+        // hidden = 0.25 * (1 + 1*1 + 2*1) = 1.0; out0 = 0.25 * (0 + 1*1) ; out1 = 0.25 * (1 + 3*1)
+        assertEquals(0, result);
+        assertEquals(0.25, outAcs.get(0), DELTA);
+        assertEquals(1.0, outAcs.get(1), DELTA);
+        assertEquals(1, hypClass.get());
+        assertEquals(1.0, confidence.get(), DELTA);
     }
 
     private AtomicReferenceArray<Double> createMinimalWeightsArray(int size) {

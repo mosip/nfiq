@@ -1,5 +1,6 @@
 package org.mosip.nist.nfiq1.mindtct;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -7,11 +8,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.mosip.nist.nfiq1.common.ILfs;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * Test class for Contour functionality
@@ -783,5 +786,281 @@ class ContourTest {
 
         Assertions.assertEquals(ILfs.FALSE, ret.get());
         Assertions.assertEquals(0, oNoOfContour.get());
+    }
+
+    private Object savedInstance;
+    private boolean instanceReplaced;
+
+    /**
+     * Restores the Contour singleton if a test replaced it.
+     */
+    @AfterEach
+    void restoreSingleton() {
+        if (instanceReplaced) {
+            ReflectionTestUtils.setField(Contour.class, "instance", savedInstance);
+            instanceReplaced = false;
+        }
+    }
+
+    /**
+     * Verifies that getInstance(int) creates a contour with lists of the requested length
+     * when no singleton exists yet, and returns that same instance afterwards.
+     */
+    @Test
+    void getInstanceWithLengthCreatesSizedContourWhenNoInstanceExists() {
+        savedInstance = ReflectionTestUtils.getField(Contour.class, "instance");
+        instanceReplaced = true;
+        ReflectionTestUtils.setField(Contour.class, "instance", null);
+
+        Contour created = Contour.getInstance(7);
+
+        Assertions.assertEquals(7, created.getNoOfContour());
+        Assertions.assertEquals(7, created.getContourX().length());
+        Assertions.assertEquals(7, created.getContourEy().length());
+        Assertions.assertSame(created, Contour.getInstance(3));
+    }
+
+    /**
+     * Verifies the contour length accessor pair and the toString summary.
+     */
+    @Test
+    void noOfContourAccessorsAndToString() {
+        Contour allocated = contour.allocateContour(new AtomicInteger(), 2);
+        allocated.setNoOfcontour(5);
+
+        Assertions.assertEquals(5, allocated.getNoOfContour());
+        Assertions.assertTrue(allocated.toString().startsWith("Contour [contourX=[0, 0], contourY=[0, 0]"));
+        Assertions.assertTrue(allocated.toString().endsWith("noOfContour=5]"));
+    }
+
+    /**
+     * Verifies getCenteredContour on a long ridge: the contour is centered on the feature,
+     * runs along the ridge's top edge and pairs each point with the white pixel above it.
+     */
+    @Test
+    void getCenteredContourAlongStraightRidgeEdge() {
+        int[] image = barImage(5, 54);
+        AtomicInteger ret = new AtomicInteger(-1);
+        AtomicInteger count = new AtomicInteger();
+
+        Contour result = contour.getCenteredContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50);
+
+        Assertions.assertEquals(ILfs.FALSE, ret.get());
+        Assertions.assertEquals(21, count.get());
+        Assertions.assertEquals(30, result.getContourX().get(10));
+        for (int i = 0; i < 21; i++) {
+            Assertions.assertEquals(20, result.getContourY().get(i));
+            Assertions.assertEquals(19, result.getContourEy().get(i));
+            Assertions.assertEquals(result.getContourX().get(i), result.getContourEx().get(i));
+        }
+        Assertions.assertEquals(20, Math.abs(result.getContourX().get(20) - result.getContourX().get(0)));
+    }
+
+    /**
+     * Verifies the non-success outcomes of getCenteredContour on synthetic shapes: same-colored
+     * start pixels, loops closing in the first or second half, and contours cut off by the image border.
+     */
+    @Test
+    void getCenteredContourReportsIgnoreLoopAndIncomplete() {
+        AtomicInteger ret = new AtomicInteger();
+        AtomicInteger count = new AtomicInteger();
+
+        Assertions.assertNull(contour.getCenteredContour(ret, count, 10, 30, 20, 31, 20, barImage(5, 54), 60, 50));
+        Assertions.assertEquals(ILfs.IGNORE, ret.get());
+
+        // 3x3 blob: the first (clockwise) half already closes the loop.
+        Assertions.assertNull(contour.getCenteredContour(ret, count, 14, 20, 20, 19, 20, blobImage(3), 60, 50));
+        Assertions.assertEquals(ILfs.LOOP_FOUND, ret.get());
+
+        // 5x5 blob: the loop closes while tracing the second half.
+        Assertions.assertNull(contour.getCenteredContour(ret, count, 14, 20, 20, 19, 20, blobImage(5), 60, 50));
+        Assertions.assertEquals(ILfs.LOOP_FOUND, ret.get());
+
+        // Ridge touching both image borders: one half runs off the image near each end.
+        int[] fullWidth = barImage(0, 59);
+        Assertions.assertNull(contour.getCenteredContour(ret, count, 10, 5, 20, 5, 19, fullWidth, 60, 50));
+        Assertions.assertEquals(ILfs.INCOMPLETE, ret.get());
+        Assertions.assertNull(contour.getCenteredContour(ret, count, 10, 54, 20, 54, 19, fullWidth, 60, 50));
+        Assertions.assertEquals(ILfs.INCOMPLETE, ret.get());
+        Assertions.assertEquals(0, count.get());
+    }
+
+    /**
+     * Verifies that getCenteredContour propagates trace/allocation errors and a second-half IGNORE.
+     */
+    @Test
+    void getCenteredContourPropagatesTraceAndAllocationErrors() {
+        int[] image = barImage(5, 54);
+        AtomicInteger ret = new AtomicInteger();
+        AtomicInteger count = new AtomicInteger();
+
+        Contour firstFails = Mockito.spy(contour);
+        stubTrace(firstFails, ILfs.SCAN_CLOCKWISE, -7);
+        Assertions.assertNull(firstFails.getCenteredContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(-7, ret.get());
+
+        Contour secondFails = Mockito.spy(contour);
+        stubTrace(secondFails, ILfs.SCAN_COUNTER_CLOCKWISE, -8);
+        Assertions.assertNull(secondFails.getCenteredContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(-8, ret.get());
+
+        Contour secondIgnored = Mockito.spy(contour);
+        stubTrace(secondIgnored, ILfs.SCAN_COUNTER_CLOCKWISE, ILfs.IGNORE);
+        Assertions.assertNull(secondIgnored.getCenteredContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(ILfs.IGNORE, ret.get());
+
+        Contour allocationFails = Mockito.spy(contour);
+        stubAllocation(allocationFails, 21, -9);
+        Assertions.assertNull(allocationFails.getCenteredContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(-9, ret.get());
+        Assertions.assertEquals(0, count.get());
+    }
+
+    /**
+     * Verifies getHighCurvatureContour error paths: allocation failures for loop and full
+     * contours, and a failing or ignored second trace.
+     */
+    @Test
+    void getHighCurvatureContourPropagatesTraceAndAllocationErrors() {
+        AtomicInteger ret = new AtomicInteger();
+        AtomicInteger count = new AtomicInteger();
+
+        // 3x3 blob loop: 7 traced points plus the feature point.
+        Contour loopAllocationFails = Mockito.spy(contour);
+        stubAllocation(loopAllocationFails, 8, -10);
+        Assertions.assertNull(loopAllocationFails.getHighCurvatureContour(ret, count, 14, 20, 20, 19, 20, blobImage(3),
+                60, 50));
+        Assertions.assertEquals(-10, ret.get());
+
+        int[] image = barImage(5, 54);
+        Contour fullAllocationFails = Mockito.spy(contour);
+        stubAllocation(fullAllocationFails, 21, -11);
+        Assertions.assertNull(fullAllocationFails.getHighCurvatureContour(ret, count, 10, 30, 20, 30, 19, image, 60,
+                50));
+        Assertions.assertEquals(-11, ret.get());
+
+        Contour secondFails = Mockito.spy(contour);
+        stubTrace(secondFails, ILfs.SCAN_COUNTER_CLOCKWISE, -12);
+        Assertions.assertNull(secondFails.getHighCurvatureContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(-12, ret.get());
+
+        Contour secondIgnored = Mockito.spy(contour);
+        stubTrace(secondIgnored, ILfs.SCAN_COUNTER_CLOCKWISE, ILfs.IGNORE);
+        Assertions.assertNull(secondIgnored.getHighCurvatureContour(ret, count, 10, 30, 20, 30, 19, image, 60, 50));
+        Assertions.assertEquals(ILfs.FALSE, ret.get());
+        Assertions.assertEquals(0, count.get());
+    }
+
+    /**
+     * Verifies that getHighCurvatureContour concatenates both halves when the loop closes
+     * during the second trace (5x5 blob: 14 clockwise points, the feature, 1 counter-clockwise point).
+     */
+    @Test
+    void getHighCurvatureContourJoinsHalvesWhenSecondHalfLoops() {
+        AtomicInteger ret = new AtomicInteger();
+        AtomicInteger count = new AtomicInteger();
+
+        Contour result = contour.getHighCurvatureContour(ret, count, 14, 20, 20, 19, 20, blobImage(5), 60, 50);
+
+        Assertions.assertNotNull(result);
+        Assertions.assertEquals(16, count.get());
+        Assertions.assertEquals(20, result.getContourX().get(14));
+        Assertions.assertEquals(20, result.getContourY().get(14));
+    }
+
+    /**
+     * Verifies that traceContour returns the allocation error without a contour.
+     */
+    @Test
+    void traceContourPropagatesAllocationError() {
+        Contour spyContour = Mockito.spy(contour);
+        Mockito.doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(-13);
+            return null;
+        }).when(spyContour).allocateContour(Mockito.any(), Mockito.anyInt());
+        AtomicInteger ret = new AtomicInteger();
+
+        Assertions.assertNull(spyContour.traceContour(ret, new AtomicInteger(), 5, 0, 0, 30, 20, 30, 19,
+                ILfs.SCAN_CLOCKWISE, barImage(5, 54), 60, 50));
+        Assertions.assertEquals(-13, ret.get());
+    }
+
+    /**
+     * Verifies that nextContourPixel fails when the neighbor scan steps off any of the four image borders.
+     */
+    @Test
+    void nextContourPixelFailsAtEachImageBorder() {
+        AtomicInteger nx = new AtomicInteger();
+        AtomicInteger ny = new AtomicInteger();
+        AtomicInteger nex = new AtomicInteger();
+        AtomicInteger ney = new AtomicInteger();
+        int[][] featureAndEdge = { { 0, 5, 1, 5 }, { 9, 5, 8, 5 }, { 5, 0, 5, 1 }, { 5, 9, 5, 8 } };
+        for (int[] p : featureAndEdge) {
+            int[] image = new int[100];
+            image[p[1] * 10 + p[0]] = 1;
+            Assertions.assertEquals(ILfs.FALSE, contour.nextContourPixel(nx, ny, nex, ney, p[0], p[1], p[2], p[3],
+                    ILfs.SCAN_CLOCKWISE, image, 10, 10));
+        }
+    }
+
+    /**
+     * Verifies startScanNbr for the four axis-aligned positions and for non-adjacent input.
+     */
+    @Test
+    void startScanNbrForAllPositions() {
+        Assertions.assertEquals(ILfs.SOUTH, contour.startScanNbr(5, 5, 5, 6));
+        Assertions.assertEquals(ILfs.NORTH, contour.startScanNbr(5, 5, 5, 4));
+        Assertions.assertEquals(ILfs.EAST, contour.startScanNbr(5, 5, 6, 5));
+        Assertions.assertEquals(ILfs.WEST, contour.startScanNbr(5, 5, 4, 5));
+        Assertions.assertEquals(ILfs.INVALID_DIR, contour.startScanNbr(5, 5, 6, 6));
+        Assertions.assertEquals(ILfs.INVALID_DIR, contour.startScanNbr(5, 5, 5, 5));
+    }
+
+    /**
+     * Verifies that minContourTheta ignores contours shorter than two angle edges plus one.
+     */
+    @Test
+    void minContourThetaIgnoresShortContour() {
+        AtomicInteger index = new AtomicInteger(-5);
+        AtomicReference<Double> theta = new AtomicReference<>(-1.0);
+
+        Assertions.assertEquals(ILfs.IGNORE, contour.minContourTheta(index, theta, 3,
+                new AtomicIntegerArray(6), new AtomicIntegerArray(6), 6));
+        Assertions.assertEquals(-5, index.get());
+        Assertions.assertEquals(-1.0, theta.get());
+    }
+
+    private static void stubTrace(Contour spyContour, int scanClock, int result) {
+        Mockito.lenient().doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(result);
+            return null;
+        }).when(spyContour).traceContour(Mockito.any(), Mockito.any(), Mockito.anyInt(), Mockito.anyInt(),
+                Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt(),
+                Mockito.eq(scanClock), Mockito.any(), Mockito.anyInt(), Mockito.anyInt());
+    }
+
+    private static void stubAllocation(Contour spyContour, int length, int result) {
+        Mockito.lenient().doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(result);
+            return null;
+        }).when(spyContour).allocateContour(Mockito.any(), Mockito.eq(length));
+    }
+
+    /** 60x50 white image with a black ridge on rows 20..22 from x0 to x1. */
+    private static int[] barImage(int x0, int x1) {
+        int[] image = new int[60 * 50];
+        for (int y = 20; y <= 22; y++) {
+            Arrays.fill(image, y * 60 + x0, y * 60 + x1 + 1, 1);
+        }
+        return image;
+    }
+
+    /** 60x50 white image with a size x size black blob whose top-left corner is (20, 20). */
+    private static int[] blobImage(int size) {
+        int[] image = new int[60 * 50];
+        for (int y = 20; y < 20 + size; y++) {
+            Arrays.fill(image, y * 60 + 20, y * 60 + 20 + size, 1);
+        }
+        return image;
     }
 }

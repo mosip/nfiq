@@ -122,6 +122,39 @@ class BlockTest {
     }
 
     /**
+     * Verifies that lowContrastBlock reports ERROR_CODE_510 when the percentile threshold is
+     * larger than the number of pixels in the block, so no minimum percentile pixel exists.
+     */
+    @Test
+    void lowContrastBlockWithUnreachablePercentileReturnsError() {
+        Mockito.when(mockLfsParams.getPercentileMinMax()).thenReturn(200);
+
+        int[] paddedImageData = new int[256];
+        for (int i = 0; i < paddedImageData.length; i++) {
+            paddedImageData[i] = i % 64;
+        }
+
+        int result = block.lowContrastBlock(0, 16, paddedImageData, 16, 16, mockLfsParams);
+
+        Assertions.assertEquals(ILfs.ERROR_CODE_510, result);
+    }
+
+    /**
+     * Verifies that blockOffsets rejects an image whose height (only) is smaller than a block.
+     */
+    @Test
+    void blockOffsetsWithImageShorterThanBlockReturnsNull() {
+        AtomicInteger ret = new AtomicInteger();
+        AtomicInteger oImageWidth = new AtomicInteger();
+        AtomicInteger oImageHeight = new AtomicInteger();
+
+        AtomicIntegerArray result = block.blockOffsets(ret, oImageWidth, oImageHeight, 64, 4, 0, 8);
+
+        Assertions.assertNull(result);
+        Assertions.assertEquals(ILfs.ERROR_CODE_80, ret.get());
+    }
+
+    /**
      * Validates that findValidBlock returns found status with valid direction
      */
     @Test

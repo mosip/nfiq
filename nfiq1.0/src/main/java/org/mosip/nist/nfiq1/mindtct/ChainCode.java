@@ -6,13 +6,31 @@ import java.util.concurrent.atomic.AtomicIntegerArray;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.IChainCode;
 
+/**
+ * 8-connected chain code utilities for feature contours in MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code chaincod.c} ({@code chain_code_loop}, {@code is_chain_clockwise}). Minutia
+ * detection uses chain codes to tell whether a traced contour loop (for example around a lake or island) runs
+ * clockwise or counter-clockwise.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized and the class keeps no mutable state.
+ */
 public class ChainCode extends MindTct implements IChainCode {
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static ChainCode instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private ChainCode() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code ChainCode} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized ChainCode getInstance() {
 		if (instance == null) {
 			instance = new ChainCode();
@@ -20,24 +38,34 @@ public class ChainCode extends MindTct implements IChainCode {
 		return instance;
 	}
 
+	/**
+	 * Returns the MINDTCT global lookup tables (including the 8-neighbour chain code table).
+	 *
+	 * @return the {@link Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: chainCodeLoop - Converts a feature's contour points into an #cat:
-	 * 8-connected chain code vector. This encoding represents #cat: the direction
-	 * taken between each adjacent point in the #cat: contour. Chain codes may be
-	 * used for many purposes, such #cat: as computing the perimeter or area of an
-	 * object, and they #cat: may be used in object detection and recognition.
-	 * Input: oContourX - x-coord list for feature's contour points oContourY -
-	 * y-coord list for feature's contour points noOfPointsInContour - number of
-	 * points in contour Output: oVectorChainCodes - resulting vector of chain codes
-	 * oNoOfCodesInChain - number of codes in chain (same as number of points in
-	 * contour) Return Code: Zero - chain code successful derived Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Converts a feature's closed contour into an 8-connected chain code vector (NIST {@code chain_code_loop}).
+	 * <p>
+	 * The encoding records the direction taken between each pair of adjacent contour points, including the step
+	 * from the last point back to the first, which closes the loop. Each code is looked up in
+	 * {@code Globals.getChaincodesNbr8()} from the neighbour deltas {@code (dx, dy)}, which lie in [-1, 1].
+	 * Chain codes have many uses, such as computing the perimeter or area of an object, and object detection
+	 * and recognition. Contours with 3 or fewer points are not treated as loops: the chain length is set to 0.
+	 *
+	 * @param oVectorChainCodes   output: receives the chain codes; must hold at least {@code noOfPointsInContour}
+	 *                            elements
+	 * @param oNoOfCodesInChain   output: number of codes in the chain (equal to the number of contour points, or
+	 *                            0 if the contour is too short)
+	 * @param oContourX           x-coordinates of the contour points
+	 * @param oContourY           y-coordinates of the contour points
+	 * @param noOfPointsInContour number of points in the contour
+	 * @return always 0 ({@link ILfs#FALSE}), meaning the chain code was derived successfully (the NIST original
+	 *         could also return a negative system error)
+	 */
 	@SuppressWarnings({ "java:S3516" })
 	public int chainCodeLoop(AtomicIntegerArray oVectorChainCodes, AtomicInteger oNoOfCodesInChain,
 			AtomicIntegerArray oContourX, AtomicIntegerArray oContourY, int noOfPointsInContour) {
@@ -85,19 +113,22 @@ public class ChainCode extends MindTct implements IChainCode {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: isChainClockwise - Takes an 8-connected chain code vector and #cat:
-	 * determines if the codes are ordered clockwise or #cat: counter-clockwise.
-	 * #cat: The routine also requires a default return value be #cat: specified in
-	 * the case the the routine is not able to #cat: definitively determine the
-	 * chains direction. This allows #cat: the default response to be
-	 * application-specific. Input: oVectorChainCodes - chain code vector
-	 * noOfCodesInChain - number of codes in chain defaultRetCode - default return
-	 * code (used when we can't tell the order) Return Code: TRUE - chain determined
-	 * to be ordered clockwise FALSE - chain determined to be ordered
-	 * counter-clockwise Default - could not determine the order of the chain
-	 **************************************************************************/
+	/**
+	 * Determines whether an 8-connected chain code vector runs clockwise or counter-clockwise (NIST
+	 * {@code is_chain_clockwise}).
+	 * <p>
+	 * Adds up the signed change in direction between consecutive codes (including the last-to-first pair),
+	 * after normalizing each change to the range [-3, 4]. Left-hand turns add and right-hand turns subtract. A
+	 * negative total means clockwise, a positive total counter-clockwise, and zero means the order cannot be
+	 * determined. The caller supplies the return value for that undetermined case, so the default response can
+	 * be application-specific.
+	 *
+	 * @param oVectorChainCodes the chain code vector
+	 * @param noOfCodesInChain  number of codes in the chain
+	 * @param defaultRetCode    value to return when the order cannot be determined
+	 * @return {@link ILfs#TRUE} if the chain is clockwise; {@link ILfs#FALSE} if it is counter-clockwise;
+	 *         {@code defaultRetCode} if the order could not be determined
+	 */
 	public int isChainClockwise(AtomicIntegerArray oVectorChainCodes, int noOfCodesInChain, int defaultRetCode) {
 		int i;
 		int j;

@@ -13,6 +13,7 @@ import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -1076,5 +1077,503 @@ public class LoopTest {
                 contourEy, 8, mockBinaryImageData, imageWidth, imageHeight, lowFlowMap, mockLfsParams);
 
         assertEquals(ILfs.FALSE, result);
+    }
+
+    private static final int ISLAND_IMAGE_WIDTH = 30;
+    private static final int ISLAND_IMAGE_HEIGHT = 20;
+    private static final int ISLAND_LEFT = 5;
+    private static final int ISLAND_RIGHT = 20;
+    private static final int ISLAND_TOP = 8;
+    private static final int ISLAND_BOTTOM = 10;
+
+    /**
+     * Validates getLoopList returns the error code when removing an IGNOREd bifurcation fails.
+     */
+    @Test
+    public void getLoopListReturnsRemoveMinutiaError() {
+        Minutiae minutiae = new Minutiae();
+        List<Minutia> list = new ArrayList<>();
+        Minutia bifurcation = mock(Minutia.class);
+        when(bifurcation.getType()).thenReturn(ILfs.BIFURCATION);
+        list.add(bifurcation);
+        minutiae.setList(list);
+        minutiae.setNum(1);
+
+        Loop spyLoop = Mockito.spy(loop);
+        Mockito.doReturn(ILfs.IGNORE).when(spyLoop).onLoop(any(), anyInt(), any(), anyInt(), anyInt());
+        MinutiaHelper helper = mock(MinutiaHelper.class);
+        when(helper.removeMinutia(anyInt(), any())).thenReturn(-5);
+        Mockito.doReturn(helper).when(spyLoop).getMinutiaHelper();
+
+        int result = spyLoop.getLoopList(new AtomicIntegerArray(1), new AtomicReference<>(minutiae), 20,
+                mockBinaryImageData, imageWidth, imageHeight);
+
+        assertEquals(-5, result);
+    }
+
+    /**
+     * Validates onIslandLake reports IGNORE when the first contour cannot be traced.
+     */
+    @Test
+    public void onIslandLakeFirstTraceIgnore() {
+        Loop spyLoop = loopWithTraceResults(ILfs.IGNORE);
+        AtomicInteger ret = new AtomicInteger(0);
+
+        Contour result = spyLoop.onIslandLake(ret, new AtomicInteger(), minutia(5, 5, 6, 5), minutia(8, 8, 9, 8),
+                10, mockBinaryImageData, imageWidth, imageHeight);
+
+        assertNull(result);
+        assertEquals(ILfs.IGNORE, ret.get());
+    }
+
+    /**
+     * Validates onIslandLake reports FALSE when the first trace does not reach the second minutia.
+     */
+    @Test
+    public void onIslandLakeFirstTraceFalse() {
+        Loop spyLoop = loopWithTraceResults(ILfs.FALSE);
+        AtomicInteger ret = new AtomicInteger(-9);
+
+        Contour result = spyLoop.onIslandLake(ret, new AtomicInteger(), minutia(5, 5, 6, 5), minutia(8, 8, 9, 8),
+                10, mockBinaryImageData, imageWidth, imageHeight);
+
+        assertNull(result);
+        assertEquals(ILfs.FALSE, ret.get());
+    }
+
+    /**
+     * Validates onIslandLake leaves the error code of a failed first trace in ret.
+     */
+    @Test
+    public void onIslandLakeFirstTraceError() {
+        Loop spyLoop = loopWithTraceResults(-3);
+        AtomicInteger ret = new AtomicInteger(0);
+
+        Contour result = spyLoop.onIslandLake(ret, new AtomicInteger(), minutia(5, 5, 6, 5), minutia(8, 8, 9, 8),
+                10, mockBinaryImageData, imageWidth, imageHeight);
+
+        assertNull(result);
+        assertEquals(-3, ret.get());
+    }
+
+    /**
+     * Validates onIslandLake reports FALSE when only the first half loop is closed.
+     */
+    @Test
+    public void onIslandLakeSecondTraceFalseReturnsFalse() {
+        Loop spyLoop = loopWithTraceResults(ILfs.LOOP_FOUND, ILfs.FALSE);
+        AtomicInteger ret = new AtomicInteger(0);
+
+        Contour result = spyLoop.onIslandLake(ret, new AtomicInteger(), minutia(5, 5, 6, 5), minutia(8, 8, 9, 8),
+                10, mockBinaryImageData, imageWidth, imageHeight);
+
+        assertNull(result);
+        assertEquals(ILfs.FALSE, ret.get());
+    }
+
+    /**
+     * Validates onIslandLake propagates the error when the combined loop contour cannot be allocated.
+     */
+    @Test
+    public void onIslandLakeAllocateContourError() {
+        Loop spyLoop = loopWithTraceResults(ILfs.LOOP_FOUND, ILfs.LOOP_FOUND);
+        Contour contourMock = spyLoop.getContour();
+        Mockito.doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(-4);
+            return null;
+        }).when(contourMock).allocateContour(any(), anyInt());
+        AtomicInteger ret = new AtomicInteger(0);
+
+        Contour result = spyLoop.onIslandLake(ret, new AtomicInteger(), minutia(5, 5, 6, 5), minutia(8, 8, 9, 8),
+                10, mockBinaryImageData, imageWidth, imageHeight);
+
+        assertNull(result);
+        assertEquals(-4, ret.get());
+    }
+
+    /**
+     * Validates onIslandLake joins the two half loops in order: first minutia, first half
+     * contour, second minutia, second half contour.
+     */
+    @Test
+    public void onIslandLakeCombinesHalfLoopsInOrder() {
+        Contour realContour = Contour.getInstance();
+        Contour firstHalf = contourOf(realContour, new int[][] { { 6, 4, 6, 3 }, { 7, 4, 7, 3 } });
+        Contour secondHalf = contourOf(realContour, new int[][] { { 7, 6, 7, 7 } });
+
+        Contour contourMock = mock(Contour.class);
+        Mockito.doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(ILfs.LOOP_FOUND);
+            ((AtomicInteger) invocation.getArgument(1)).set(2);
+            return firstHalf;
+        }).doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(ILfs.LOOP_FOUND);
+            ((AtomicInteger) invocation.getArgument(1)).set(1);
+            return secondHalf;
+        }).when(contourMock).traceContour(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), any(), anyInt(), anyInt());
+        Mockito.doAnswer(invocation -> realContour.allocateContour(invocation.getArgument(0),
+                invocation.getArgument(1))).when(contourMock).allocateContour(any(), anyInt());
+        Loop spyLoop = Mockito.spy(loop);
+        Mockito.doReturn(contourMock).when(spyLoop).getContour();
+        AtomicInteger ret = new AtomicInteger(0);
+        AtomicInteger nLoop = new AtomicInteger(0);
+
+        Contour result = spyLoop.onIslandLake(ret, nLoop, minutia(5, 5, 5, 4), minutia(8, 5, 8, 6), 10,
+                mockBinaryImageData, imageWidth, imageHeight);
+
+        assertEquals(ILfs.LOOP_FOUND, ret.get());
+        assertEquals(5, nLoop.get());
+        int[] expectedX = { 5, 6, 7, 8, 7 };
+        int[] expectedY = { 5, 4, 4, 5, 6 };
+        int[] expectedEy = { 4, 3, 3, 6, 7 };
+        for (int i = 0; i < 5; i++) {
+            assertEquals(expectedX[i], result.getContourX().get(i), "x " + i);
+            assertEquals(expectedY[i], result.getContourY().get(i), "y " + i);
+            assertEquals(expectedEy[i], result.getContourEy().get(i), "ey " + i);
+        }
+    }
+
+    /**
+     * Validates onHook returns IGNORE when the first (clockwise) trace is not possible.
+     */
+    @Test
+    public void onHookFirstTraceIgnore() {
+        assertEquals(ILfs.IGNORE, loopWithTraceResults(ILfs.IGNORE).onHook(minutia(3, 3, 4, 3),
+                minutia(6, 6, 7, 6), 8, mockBinaryImageData, imageWidth, imageHeight));
+    }
+
+    /**
+     * Validates onHook returns the error code of a failed clockwise trace without retrying.
+     */
+    @Test
+    public void onHookFirstTraceError() {
+        assertEquals(-4, loopWithTraceResults(-4).onHook(minutia(3, 3, 4, 3), minutia(6, 6, 7, 6), 8,
+                mockBinaryImageData, imageWidth, imageHeight));
+    }
+
+    /**
+     * Validates onHook retries counter-clockwise and reports each outcome of the second trace.
+     */
+    @Test
+    public void onHookSecondTraceOutcomes() {
+        Minutia first = minutia(3, 3, 4, 3);
+        Minutia second = minutia(6, 6, 7, 6);
+
+        assertEquals(ILfs.IGNORE, loopWithTraceResults(ILfs.FALSE, ILfs.IGNORE).onHook(first, second, 8,
+                mockBinaryImageData, imageWidth, imageHeight));
+        assertEquals(ILfs.HOOK_FOUND, loopWithTraceResults(ILfs.FALSE, ILfs.LOOP_FOUND).onHook(first, second, 8,
+                mockBinaryImageData, imageWidth, imageHeight));
+        assertEquals(ILfs.FALSE, loopWithTraceResults(ILfs.FALSE, ILfs.FALSE).onHook(first, second, 8,
+                mockBinaryImageData, imageWidth, imageHeight));
+        assertEquals(-6, loopWithTraceResults(ILfs.FALSE, -6).onHook(first, second, 8, mockBinaryImageData,
+                imageWidth, imageHeight));
+    }
+
+    /**
+     * Validates getLoopAspect on an odd-length contour walks the whole perimeter and records
+     * the indices of the minimum and maximum opposite-point distances.
+     */
+    @Test
+    public void getLoopAspectOddLengthContour() {
+        AtomicIntegerArray contourX = new AtomicIntegerArray(new int[] { 0, 4, 4, 2, 0 });
+        AtomicIntegerArray contourY = new AtomicIntegerArray(new int[] { 0, 0, 2, 3, 2 });
+        AtomicInteger minFrom = new AtomicInteger(-1);
+        AtomicInteger minTo = new AtomicInteger(-1);
+        AtomicReference<Double> minDist = new AtomicReference<>();
+        AtomicInteger maxFrom = new AtomicInteger(-1);
+        AtomicInteger maxTo = new AtomicInteger(-1);
+        AtomicReference<Double> maxDist = new AtomicReference<>();
+
+        loop.getLoopAspect(minFrom, minTo, minDist, maxFrom, maxTo, maxDist, contourX, contourY, 5);
+
+        assertEquals(13.0, minDist.get());
+        assertEquals(1, minFrom.get());
+        assertEquals(3, minTo.get());
+        assertEquals(20.0, maxDist.get());
+        assertEquals(0, maxFrom.get());
+        assertEquals(2, maxTo.get());
+    }
+
+    /**
+     * Validates fillLoop returns the error code when a shape cannot be built from the contour.
+     */
+    @Test
+    public void fillLoopShapeError() {
+        Loop spyLoop = Mockito.spy(loop);
+        Shapes shapes = mock(Shapes.class);
+        Mockito.doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(-7);
+            return null;
+        }).when(shapes).shapeFromContour(any(), any(), any(), anyInt());
+        Mockito.doReturn(shapes).when(spyLoop).getShapes();
+
+        int result = spyLoop.fillLoop(new AtomicIntegerArray(3), new AtomicIntegerArray(3), 3, mockBinaryImageData,
+                imageWidth, imageHeight);
+
+        assertEquals(-7, result);
+    }
+
+    /**
+     * Validates processLoop on an elongated black island adds two opposite RIDGE_ENDING minutiae
+     * at the ends of the loop's longest axis, with directions 180 degrees apart.
+     */
+    @Test
+    public void processLoopElongatedIslandAddsTwoMinutiae() {
+        int[] image = islandImage();
+        AtomicIntegerArray[] contour = islandContour();
+        Minutiae minutiae = emptyMinutiae();
+        LfsParams params = Globals.getInstance().getLfsParams();
+
+        int result = loop.processLoop(new AtomicReference<>(minutiae), contour[0], contour[1], contour[2],
+                contour[3], contour[0].length(), image, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT, params);
+
+        assertEquals(ILfs.FALSE, result);
+        assertEquals(2, minutiae.getNum());
+        Minutia first = minutiae.getList().get(0);
+        Minutia second = minutiae.getList().get(1);
+        assertEquals(ISLAND_LEFT, first.getX());
+        assertEquals(ISLAND_TOP, first.getY());
+        assertEquals(ISLAND_RIGHT, second.getX());
+        assertEquals(ISLAND_BOTTOM, second.getY());
+        assertEquals(ILfs.RIDGE_ENDING, first.getType());
+        assertEquals(ILfs.RIDGE_ENDING, second.getType());
+        assertEquals(ILfs.DEFAULT_RELIABILITY, first.getReliability());
+        assertEquals((first.getDirection() + params.getNumDirections()) % (params.getNumDirections() << 1),
+                second.getDirection());
+        assertEquals(1, image[(9 * ISLAND_IMAGE_WIDTH) + 12], "island must not be filled");
+    }
+
+    /**
+     * Validates processLoopV2 assigns MEDIUM reliability to a loop minutia in a low ridge flow block
+     * and HIGH reliability to one in a reliable block.
+     */
+    @Test
+    public void processLoopV2ReliabilityFollowsLowFlowMap() {
+        int[] image = islandImage();
+        AtomicIntegerArray[] contour = islandContour();
+        Minutiae minutiae = emptyMinutiae();
+        AtomicIntegerArray lowFlow = new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT);
+        lowFlow.set((ISLAND_TOP * ISLAND_IMAGE_WIDTH) + ISLAND_LEFT, ILfs.TRUE);
+
+        int result = loop.processLoopV2(new AtomicReference<>(minutiae), contour[0], contour[1], contour[2],
+                contour[3], contour[0].length(), image, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT, lowFlow,
+                Globals.getInstance().getLfsParamsV2());
+
+        assertEquals(ILfs.FALSE, result);
+        assertEquals(2, minutiae.getNum());
+        assertEquals(ILfs.MEDIUM_RELIABILITY, minutiae.getList().get(0).getReliability());
+        assertEquals(ILfs.HIGH_RELIABILITY, minutiae.getList().get(1).getReliability());
+    }
+
+    /**
+     * Validates processLoop and processLoopV2 fill the loop instead of adding minutiae when the
+     * loop is neither narrow nor elongated enough.
+     */
+    @Test
+    public void processLoopFillsLoopFailingAspectTests() {
+        AtomicIntegerArray[] contour = islandContour();
+        LfsParams params = mock(LfsParams.class);
+        when(params.getMinLoopLen()).thenReturn(3);
+        when(params.getMinLoopAspectDist()).thenReturn(0.0);
+        when(params.getMinLoopAspectRatio()).thenReturn(1000.0);
+
+        int[] image = islandImage();
+        Minutiae minutiae = emptyMinutiae();
+        int result = loop.processLoop(new AtomicReference<>(minutiae), contour[0], contour[1], contour[2],
+                contour[3], contour[0].length(), image, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT, params);
+
+        assertEquals(ILfs.FALSE, result);
+        assertEquals(0, minutiae.getNum());
+        assertEquals(0, image[(9 * ISLAND_IMAGE_WIDTH) + 12], "island interior must be filled");
+
+        int[] imageV2 = islandImage();
+        Minutiae minutiaeV2 = emptyMinutiae();
+        int resultV2 = loop.processLoopV2(new AtomicReference<>(minutiaeV2), contour[0], contour[1], contour[2],
+                contour[3], contour[0].length(), imageV2, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT), params);
+
+        assertEquals(ILfs.FALSE, resultV2);
+        assertEquals(0, minutiaeV2.getNum());
+        assertEquals(0, imageV2[(9 * ISLAND_IMAGE_WIDTH) + 12], "island interior must be filled");
+    }
+
+    /**
+     * Validates processLoop and processLoopV2 fill the loop when the loop's interior midpoint does
+     * not have the feature pixel value.
+     */
+    @Test
+    public void processLoopFillsLoopWithInconsistentInterior() {
+        AtomicIntegerArray[] contour = islandContour();
+        int midIndex = (9 * ISLAND_IMAGE_WIDTH) + 12;
+
+        int[] image = islandImage();
+        image[midIndex] = 0;
+        Minutiae minutiae = emptyMinutiae();
+        assertEquals(ILfs.FALSE, loop.processLoop(new AtomicReference<>(minutiae), contour[0], contour[1],
+                contour[2], contour[3], contour[0].length(), image, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(0, minutiae.getNum());
+
+        int[] imageV2 = islandImage();
+        imageV2[midIndex] = 0;
+        Minutiae minutiaeV2 = emptyMinutiae();
+        assertEquals(ILfs.FALSE, loop.processLoopV2(new AtomicReference<>(minutiaeV2), contour[0], contour[1],
+                contour[2], contour[3], contour[0].length(), imageV2, ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT),
+                Globals.getInstance().getLfsParamsV2()));
+        assertEquals(0, minutiaeV2.getNum());
+    }
+
+    /**
+     * Validates processLoop and processLoopV2 return the error code when the appearing/disappearing
+     * test fails for the first or for the opposite loop point.
+     */
+    @Test
+    public void processLoopReturnsAppearingErrors() {
+        AtomicIntegerArray[] contour = islandContour();
+        int n = contour[0].length();
+
+        MinutiaHelper helper = minutiaHelperMock(ILfs.FALSE);
+        when(helper.isMinutiaAppearing(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(-2);
+        Loop spyLoop = loopWithMinutiaHelper(helper);
+        assertEquals(-2, spyLoop.processLoop(new AtomicReference<>(emptyMinutiae()), contour[0], contour[1],
+                contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(-2, spyLoop.processLoopV2(new AtomicReference<>(emptyMinutiae()), contour[0], contour[1],
+                contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT),
+                Globals.getInstance().getLfsParamsV2()));
+
+        MinutiaHelper secondFails = minutiaHelperMock(ILfs.FALSE);
+        when(secondFails.isMinutiaAppearing(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(1, -3, 1, -3);
+        Loop spySecond = loopWithMinutiaHelper(secondFails);
+        assertEquals(-3, spySecond.processLoop(new AtomicReference<>(emptyMinutiae()), contour[0], contour[1],
+                contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(-3, spySecond.processLoopV2(new AtomicReference<>(emptyMinutiae()), contour[0], contour[1],
+                contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT),
+                Globals.getInstance().getLfsParamsV2()));
+    }
+
+    /**
+     * Validates processLoop and processLoopV2 free both candidate minutiae when the minutiae list
+     * IGNOREs them, and still complete normally.
+     */
+    @Test
+    public void processLoopFreesIgnoredMinutiae() {
+        AtomicIntegerArray[] contour = islandContour();
+        int n = contour[0].length();
+        MinutiaHelper helper = minutiaHelperMock(ILfs.IGNORE);
+        when(helper.isMinutiaAppearing(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(1);
+        Loop spyLoop = loopWithMinutiaHelper(helper);
+
+        assertEquals(ILfs.FALSE, spyLoop.processLoop(new AtomicReference<>(emptyMinutiae()), contour[0],
+                contour[1], contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(ILfs.FALSE, spyLoop.processLoopV2(new AtomicReference<>(emptyMinutiae()), contour[0],
+                contour[1], contour[2], contour[3], n, islandImage(), ISLAND_IMAGE_WIDTH, ISLAND_IMAGE_HEIGHT,
+                new AtomicIntegerArray(ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT),
+                Globals.getInstance().getLfsParamsV2()));
+
+        Mockito.verify(helper, Mockito.times(4)).freeMinutia(any());
+    }
+
+    private static Minutia minutia(int x, int y, int ex, int ey) {
+        Minutia minutia = mock(Minutia.class);
+        when(minutia.getX()).thenReturn(x);
+        when(minutia.getY()).thenReturn(y);
+        when(minutia.getEx()).thenReturn(ex);
+        when(minutia.getEy()).thenReturn(ey);
+        return minutia;
+    }
+
+    /** Spies the Loop singleton so successive contour traces report the given return codes. */
+    private Loop loopWithTraceResults(int... results) {
+        Contour contourMock = mock(Contour.class);
+        AtomicInteger call = new AtomicInteger();
+        Mockito.doAnswer(invocation -> {
+            int index = Math.min(call.getAndIncrement(), results.length - 1);
+            ((AtomicInteger) invocation.getArgument(0)).set(results[index]);
+            return results[index] == ILfs.IGNORE ? null : mock(Contour.class);
+        }).when(contourMock).traceContour(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), any(), anyInt(), anyInt());
+        Loop spyLoop = Mockito.spy(loop);
+        Mockito.doReturn(contourMock).when(spyLoop).getContour();
+        return spyLoop;
+    }
+
+    private static Contour contourOf(Contour factory, int[][] points) {
+        Contour contour = factory.allocateContour(new AtomicInteger(), points.length);
+        for (int i = 0; i < points.length; i++) {
+            contour.getContourX().set(i, points[i][0]);
+            contour.getContourY().set(i, points[i][1]);
+            contour.getContourEx().set(i, points[i][2]);
+            contour.getContourEy().set(i, points[i][3]);
+        }
+        return contour;
+    }
+
+    /** Binary image (1 = black) containing a single 16x3 black island. */
+    private static int[] islandImage() {
+        int[] image = new int[ISLAND_IMAGE_WIDTH * ISLAND_IMAGE_HEIGHT];
+        for (int y = ISLAND_TOP; y <= ISLAND_BOTTOM; y++) {
+            for (int x = ISLAND_LEFT; x <= ISLAND_RIGHT; x++) {
+                image[(y * ISLAND_IMAGE_WIDTH) + x] = 1;
+            }
+        }
+        return image;
+    }
+
+    /**
+     * Clockwise contour of the island's boundary pixels starting at its top-left corner, with each
+     * point's edge neighbour just outside the island. Returns {x, y, ex, ey}.
+     */
+    private static AtomicIntegerArray[] islandContour() {
+        List<int[]> points = new ArrayList<>();
+        for (int x = ISLAND_LEFT; x <= ISLAND_RIGHT; x++) {
+            points.add(new int[] { x, ISLAND_TOP, x, ISLAND_TOP - 1 });
+        }
+        for (int y = ISLAND_TOP + 1; y < ISLAND_BOTTOM; y++) {
+            points.add(new int[] { ISLAND_RIGHT, y, ISLAND_RIGHT + 1, y });
+        }
+        for (int x = ISLAND_RIGHT; x >= ISLAND_LEFT; x--) {
+            points.add(new int[] { x, ISLAND_BOTTOM, x, ISLAND_BOTTOM + 1 });
+        }
+        for (int y = ISLAND_BOTTOM - 1; y > ISLAND_TOP; y--) {
+            points.add(new int[] { ISLAND_LEFT, y, ISLAND_LEFT - 1, y });
+        }
+        AtomicIntegerArray[] contour = new AtomicIntegerArray[4];
+        for (int c = 0; c < 4; c++) {
+            contour[c] = new AtomicIntegerArray(points.size());
+            for (int i = 0; i < points.size(); i++) {
+                contour[c].set(i, points.get(i)[c]);
+            }
+        }
+        return contour;
+    }
+
+    private static Minutiae emptyMinutiae() {
+        Minutiae minutiae = new Minutiae();
+        minutiae.setList(new ArrayList<>());
+        minutiae.setNum(0);
+        minutiae.setAlloc(10);
+        return minutiae;
+    }
+
+    private static MinutiaHelper minutiaHelperMock(int updateResult) {
+        MinutiaHelper helper = mock(MinutiaHelper.class);
+        when(helper.getMinutiaType(anyInt())).thenReturn(ILfs.RIDGE_ENDING);
+        when(helper.createMinutia(anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), Mockito.anyDouble(), anyInt(),
+                anyInt(), anyInt())).thenReturn(mock(Minutia.class));
+        when(helper.updateMinutiae(any(), any(), any(), anyInt(), anyInt(), any())).thenReturn(updateResult);
+        return helper;
+    }
+
+    private Loop loopWithMinutiaHelper(MinutiaHelper helper) {
+        Loop spyLoop = Mockito.spy(loop);
+        Mockito.doReturn(helper).when(spyLoop).getMinutiaHelper();
+        return spyLoop;
     }
 }

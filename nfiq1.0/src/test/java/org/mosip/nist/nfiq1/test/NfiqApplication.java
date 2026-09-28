@@ -47,7 +47,7 @@ public class NfiqApplication {
 
 		if (args != null && args.length >= 1) {
 			imageFile = args[0];
-			// imgfile=info_wsq.iso/info_jp2.iso --ISO file having jp2 or wsq
+			// imgfile=src/test/resources/info_wsq.iso|info_jp2.iso -- ISO file (jp2 or wsq), relative to CWD
 			if (imageFile.contains("imgfile"))// 0
 			{
 				imageFile = imageFile.split("=")[1];

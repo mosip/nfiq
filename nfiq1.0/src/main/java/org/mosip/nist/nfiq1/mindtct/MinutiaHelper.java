@@ -18,61 +18,149 @@ import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Java port of NIST MINDTCT {@code minutia.c}: detection, bookkeeping and ordering of minutiae
+ * within the LFS (Loops, Forks and Splits) minutiae detection pipeline used by NFIQ 1.0.
+ *
+ * <p>This helper is responsible for:
+ * <ul>
+ * <li>allocating and growing the {@link Minutiae} list ({@code alloc_minutiae}, {@code realloc_minutiae});</li>
+ * <li>scanning the binarized fingerprint image horizontally and vertically for the ridge-ending and
+ * bifurcation pixel patterns defined in {@link Globals#getFeaturePatterns()} ({@code scan4minutiae*});</li>
+ * <li>turning each detected pattern into a {@link Minutia} with a location, direction, type,
+ * appearing/disappearing flag and reliability ({@code process_*_scan_minutia*},
+ * {@code adjust_high_curvature_minutia*}, {@code get_low_curvature_direction});</li>
+ * <li>adding candidates to the list while rejecting duplicates ({@code update_minutiae*});</li>
+ * <li>sorting, de-duplicating, removing and joining minutiae ({@code sort_minutiae_*},
+ * {@code rm_dup_minutiae}, {@code remove_minutia}, {@code join_minutia});</li>
+ * <li>debug dumps of minutiae lists to text files ({@code dump_minutiae*}).</li>
+ * </ul>
+ *
+ * <p>The false-minutiae removal stage that follows detection is implemented in {@link RemoveMinutia}.
+ *
+ * <p>The class is a stateless singleton obtained through {@link #getInstance()} (initialization-on-demand
+ * holder idiom). It holds no mutable state of its own, so the instance can be shared between threads as long
+ * as callers do not share the {@link Minutiae} lists or image buffers they pass in.
+ */
 public class MinutiaHelper extends MindTct implements IMinutia {
+	/**
+	 * SLF4J logger used to report errors (e.g. out-of-range indices, bad pixel configurations) and debug-dump
+	 * status for this class.
+	 */
 	private static final Logger logger = LoggerFactory.getLogger(MinutiaHelper.class);
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()} instead.
+	 */
 	private MinutiaHelper() {
 		super();
 	}
 
+	/**
+	 * Initialization-on-demand holder for the {@link MinutiaHelper} singleton. The JVM class-loading guarantees
+	 * make creation of {@link #INSTANCE} lazy and thread-safe without explicit locking.
+	 */
 	private static class Holder {
+		/**
+		 * The single shared {@link MinutiaHelper} instance, created when {@link Holder} is first loaded.
+		 */
 		private static final MinutiaHelper INSTANCE = new MinutiaHelper();
 	}
 
+	/**
+	 * Returns the shared {@link MinutiaHelper} singleton.
+	 *
+	 * @return the lazily created, process-wide {@link MinutiaHelper} instance
+	 */
 	public static synchronized MinutiaHelper getInstance() {
 		return Holder.INSTANCE;
 	}
 
+	/**
+	 * Returns the {@link MatchPattern} singleton used to match scanned pixel-pair sequences against the
+	 * minutia feature patterns.
+	 *
+	 * @return the shared {@link MatchPattern} instance
+	 */
 	public MatchPattern getMatchPattern() {
 		return MatchPattern.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Globals} singleton that holds the MINDTCT global tables (feature patterns, etc.).
+	 *
+	 * @return the shared {@link Globals} instance
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Contour} singleton used to trace and search feature contours.
+	 *
+	 * @return the shared {@link Contour} instance
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Line} singleton used to compute the pixel points along a line segment.
+	 *
+	 * @return the shared {@link Line} instance
+	 */
 	public Line getLine() {
 		return Line.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Free} singleton, the Java stand-in for the C memory deallocation helpers.
+	 *
+	 * @return the shared {@link Free} instance
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Sort} singleton used to compute sorted index orders.
+	 *
+	 * @return the shared {@link Sort} instance
+	 */
 	public Sort getSort() {
 		return Sort.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Loop} singleton used to detect and process loops found while tracing contours.
+	 *
+	 * @return the shared {@link Loop} instance
+	 */
 	public Loop getLoop() {
 		return Loop.getInstance();
 	}
 
+	/**
+	 * Returns the {@link LfsUtil} singleton providing LFS geometry utilities (distances, line directions, ...).
+	 *
+	 * @return the shared {@link LfsUtil} instance
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocMinutiae - Allocates and initializes a minutia list based on the
-	 * #cat: specified maximum number of minutiae to be detected. Input: maxMinutiae
-	 * - number of minutia to be allocated in list Output: oMinutiae - points to the
-	 * allocated minutiae list Return Code: Zero - successful completion Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Allocates and initializes a minutiae list sized for the specified maximum number of minutiae.
+	 *
+	 * <p>NIST origin: {@code alloc_minutiae()} in {@code minutia.c}. A new backing {@link ArrayList} with initial
+	 * capacity {@code maxMinutiae} is assigned to the referenced {@link Minutiae}, its allocated length is set to
+	 * {@code maxMinutiae} and its count of stored minutiae is reset to zero.
+	 *
+	 * @param oMinutiae   holder of an already constructed {@link Minutiae} object; on return its list, allocated
+	 *                    length and count are initialized
+	 * @param maxMinutiae number of minutiae slots to allocate in the list
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int allocMinutiae(AtomicReference<Minutiae> oMinutiae, final int maxMinutiae) {
 		List<Minutia> list = new ArrayList<>(maxMinutiae);
 
@@ -83,15 +171,17 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: reallocMinutiae - Reallocates a previously allocated minutia list #cat:
-	 * extending its allocated length based on the specified #cat: increment. Input:
-	 * oMinutiae - previously allocated list of minutiae points incrMinutiae -
-	 * number of minutia to be allocated in list Output: oMinutiae - extended list
-	 * of minutiae points Return Code: Zero - successful completion Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Extends the allocated length of a previously allocated minutiae list by the specified increment.
+	 *
+	 * <p>NIST origin: {@code realloc_minutiae()} in {@code minutia.c}. The allocated length recorded in the
+	 * {@link Minutiae} object is increased by {@code incrMinutiae} and the capacity of the backing list is
+	 * ensured accordingly; existing entries are preserved.
+	 *
+	 * @param oMinutiae    holder of a previously allocated minutiae list; extended in place
+	 * @param incrMinutiae number of additional minutiae slots to allocate
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int reallocMinutiae(AtomicReference<Minutiae> oMinutiae, final int incrMinutiae) {
 		oMinutiae.get().setAlloc(oMinutiae.get().getAlloc() + incrMinutiae);
 		((ArrayList<?>) oMinutiae.get().getList()).ensureCapacity(oMinutiae.get().getList().size() + incrMinutiae);
@@ -99,22 +189,27 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: detectMinutiaeV2 - Takes a binary image and its associated #cat:
-	 * Direction and Low Flow Maps and scans each image block #cat: with valid
-	 * direction for minutia points. Minutia points #cat: detected in LOW FLOW
-	 * blocks are set with lower reliability. Input: binarizedImageData - binary
-	 * image data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image Maps - object contains all below
-	 * //direction_map - map of image blocks containing directional ridge flow
-	 * //low_flow_map - map of image blocks flagged as LOW RIDGE FLOW
-	 * //high_curve_map - map of image blocks flagged as HIGH CURVATURE
-	 * mappedImageWidth - width (in blocks) of the maps mappedImageHeight - height
-	 * (in blocks) of the maps lfsParams - parameters and thresholds for controlling
-	 * LFS Output: oMinutiae - points to a list of detected minutia structures
-	 * Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans a binary image, guided by its block Direction, Low Flow and High Curvature maps, for minutia points.
+	 *
+	 * <p>NIST origin: {@code detect_minutiae_V2()} in {@code minutia.c}. The block-level maps held by {@code map}
+	 * are first "pixelized" (each block value copied to every pixel it covers) via
+	 * {@link Maps#pixelizeMap}. The whole image is then scanned horizontally
+	 * ({@link #scanForMinutiaeHorizontallyV2}) and vertically ({@link #scanForMinutiaeVerticallyV2}).
+	 * Minutia points detected in blocks with INVALID direction are ignored, and those detected in LOW FLOW
+	 * blocks are assigned a lower reliability.
+	 *
+	 * @param oMinutiae          holder of the minutiae list; detected minutiae are appended to it
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param mappedImageWidth   width of the binary image in pixels (the dimensions the block maps are pixelized
+	 *                           to, despite the parameter name)
+	 * @param mappedImageHeight  height of the binary image in pixels (see {@code mappedImageWidth})
+	 * @param map                maps object holding the block Direction Map, Low Flow Map and High Curvature Map
+	 *                           together with their width and height in blocks
+	 * @param lfsParams          parameters and thresholds for controlling LFS; {@code blockOffsetSize} gives the
+	 *                           block size in pixels used when pixelizing the maps
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int detectMinutiaeV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int mappedImageWidth, final int mappedImageHeight, Maps map, LfsParams lfsParams) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -159,18 +254,25 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: updateMinutiae - Takes a detected minutia point and (if it is not #cat:
-	 * determined to already be in the minutiae list) adds it to #cat: the list.
-	 * Input: oMinutiae - minutia structure for detected point binarizedImageData -
-	 * binary image data (0==while & 1==black) imageWidth - width (in pixels) of
-	 * image imageHeight - height (in pixels) of image lfsParams - parameters and
-	 * thresholds for controlling LFS Output: oMinutiae - points to a list of
-	 * detected minutia structures Return Code: Zero - minutia added to successfully
-	 * added to minutiae list IGNORE - minutia is to be ignored (already in the
-	 * minutiae list) Negative - system error
-	 **************************************************************************/
+	/**
+	 * Adds a detected minutia to the list unless it is judged to already be present.
+	 *
+	 * <p>NIST origin: {@code update_minutiae()} in {@code minutia.c}. If the list is full it is first grown by
+	 * {@link ILfs#MAX_MINUTIAE} via {@link #reallocMinutiae}. The new minutia is considered a duplicate of an
+	 * existing one when both lie within {@code maxMinutiaDelta} pixels in x and y, have the same type, their
+	 * directions differ by at most 45 degrees (a quarter of the semicircle directions), and either they share
+	 * the exact same pixel or the new point is found within {@code maxMinutiaDelta} steps along the existing
+	 * minutia's contour (searched clockwise, then counter-clockwise). Otherwise the minutia is appended.
+	 *
+	 * @param oMinutiae          holder of the minutiae list; the minutia is appended to it when accepted
+	 * @param minutia            the newly detected minutia candidate
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) if the minutia was added to the list; {@link ILfs#IGNORE} if it is
+	 *         ignored because it is already in the list; a negative value on system error
+	 */
 	public int updateMinutiae(AtomicReference<Minutiae> oMinutiae, Minutia minutia, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, final LfsParams lfsParams) {
 		int minutiaIndex;
@@ -280,21 +382,30 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: updateMinutiaeV2 - Takes a detected minutia point and (if it is not
-	 * #cat: determined to already be in the minutiae list or the #cat: new point is
-	 * determined to be "more compatible") adds #cat: it to the list. Input:
-	 * oMinutiae - minutia structure for detected point scanDir - orientation of
-	 * scan when minutia was detected directionMapValue - directional ridge flow of
-	 * block minutia is in binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image lfsParams - parameters and thresholds for controlling LFS
-	 * Output: oMinutiae - points to a list of detected oMinutiae structures Return
-	 * Code: Zero - minutia added to successfully added to oMinutiae list IGNORE -
-	 * minutia is to be ignored (already in the oMinutiae list) Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Adds a detected minutia to the list unless it already exists there, preferring the more "compatible" of
+	 * two near-duplicate minutiae.
+	 *
+	 * <p>NIST origin: {@code update_minutiae_V2()} in {@code minutia.c}. Works like {@link #updateMinutiae}
+	 * (same proximity, type, direction and shared-contour tests, but walking the list in reverse order).
+	 * When a near-duplicate sharing the same contour is found and the new minutia lies in a block with VALID
+	 * direction, the scan direction compatible with that block direction ({@link #chooseScanDirection}) is
+	 * compared with {@code scanDir}: if they match, the existing minutia is removed and the new one kept;
+	 * otherwise the new minutia is ignored. With INVALID block direction the new minutia is ignored.
+	 *
+	 * @param oMinutiae          holder of the minutiae list; may have entries removed and the new minutia
+	 *                           appended
+	 * @param minutia            the newly detected minutia candidate
+	 * @param scanDir            orientation of the scan that detected the minutia
+	 *                           ({@link ILfs#SCAN_HORIZONTAL} or {@link ILfs#SCAN_VERTICAL})
+	 * @param directionMapValue  directional ridge flow of the block containing the minutia (negative if INVALID)
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) if the minutia was added to the list; {@link ILfs#IGNORE} if it is
+	 *         ignored (already in the list); a negative value on system error
+	 */
 	public int updateMinutiaeV2(AtomicReference<Minutiae> oMinutiae, Minutia minutia, final int scanDir,
 			final int directionMapValue, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			final LfsParams lfsParams) {
@@ -424,14 +535,18 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortMinutiaeTopToBottomAndThenLeftToRight - Takes a list of minutia
-	 * points and sorts them #cat: top-to-bottom and then left-to-right. Input:
-	 * oMinutiae - list of minutiae imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image Output: oMinutiae - list of sorted
-	 * minutiae Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Sorts a minutiae list top-to-bottom and then left-to-right.
+	 *
+	 * <p>NIST origin: {@code sort_minutiae_y_x()} in {@code minutia.c}. Each minutia is ranked by its 1-D pixel
+	 * offset {@code y * imageWidth + x}, the ranks are sorted in increasing order and the list is rebuilt in
+	 * that order.
+	 *
+	 * @param oMinutiae   holder of the minutiae list; reordered in place
+	 * @param imageWidth  width of the image, in pixels
+	 * @param imageHeight height of the image, in pixels (unused; kept for parity with the C API)
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int sortMinutiaeTopToBottomAndThenLeftToRight(AtomicReference<Minutiae> oMinutiae, final int imageWidth,
 			final int imageHeight) {
 		AtomicIntegerArray ranks, order;
@@ -477,14 +592,17 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortMinutiaeLeftToRightAndThenTopToBottom - Takes a list of minutia
-	 * points and sorts them #cat: left-to-right and then top-to-bottom. Input:
-	 * oMinutiae - list of oMinutiae imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image Output: oMinutiae - list of sorted
-	 * oMinutiae Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Sorts a minutiae list left-to-right and then top-to-bottom.
+	 *
+	 * <p>NIST origin: {@code sort_minutiae_x_y()} in {@code minutia.c}. Each minutia is ranked by
+	 * {@code x * imageWidth + y}, the ranks are sorted in increasing order and the list is rebuilt in that order.
+	 *
+	 * @param oMinutiae   holder of the minutiae list; reordered in place
+	 * @param imageWidth  width of the image, in pixels
+	 * @param imageHeight height of the image, in pixels (unused; kept for parity with the C API)
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int sortMinutiaeLeftToRightAndThenTopToBottom(AtomicReference<Minutiae> oMinutiae, final int imageWidth,
 			final int imageHeight) {
 		AtomicIntegerArray ranks;
@@ -530,15 +648,17 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeRedundantMinutiaeremoveRedundantMinutiae - Takes a list of
-	 * minutiae sorted in some adjacent order #cat: and detects and removes
-	 * redundant minutia that have the #cat: same exact pixel coordinate locations
-	 * (even if other #cat: attributes may differ). Input: oMinutiae - list of
-	 * sorted minutiae Output: oMinutiae - list of sorted minutiae with duplicates
-	 * removed Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes redundant minutiae that share exactly the same pixel coordinates.
+	 *
+	 * <p>NIST origin: {@code rm_dup_minutiae()} in {@code minutia.c}. The list must already be sorted in some
+	 * adjacent order (e.g. by {@link #sortMinutiaeTopToBottomAndThenLeftToRight}). Walking backwards, whenever
+	 * two consecutive minutiae have identical coordinates the earlier one is removed, even if other attributes
+	 * differ.
+	 *
+	 * @param oMinutiae holder of the sorted minutiae list; duplicates are removed in place
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removeRedundantMinutiae(AtomicReference<Minutiae> oMinutiae) {
 		int i;
 		int ret;
@@ -565,12 +685,16 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dump_minutiae - Given a oMinutiae list, writes a formatted text report
-	 * of #cat: the list's contents to the specified open file pointer. Input:
-	 * oMinutiae - list of minutia structures Output: file - open file pointer
-	 **************************************************************************/
+	/**
+	 * Writes a formatted text report of the contents of a minutiae list to a file (debugging aid).
+	 *
+	 * <p>NIST origin: {@code dump_minutiae()} in {@code minutia.c}. For each minutia the index, coordinates,
+	 * direction, reliability, type (RIG/BIF), appearing flag (APP/DIS), feature id and neighbor information are
+	 * written. I/O errors are logged and not propagated.
+	 *
+	 * @param file      destination file (overwritten)
+	 * @param oMinutiae holder of the minutiae list to report
+	 */
 	public void dumpMinutiae(File file, AtomicReference<Minutiae> oMinutiae) {
 		try (FileWriter myWriter = new FileWriter(file.getAbsoluteFile())) {
 			myWriter.write(MessageFormat.format("{0} Minutiae Detected", oMinutiae.get().getNum()));
@@ -600,25 +724,26 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 					myWriter.write(MessageFormat.format(": {0},{1}; {2} ",
 							oMinutiae.get().getList().get(oMinutiae.get().getList().get(i).getNbrs().get(j)).getX(),
 							oMinutiae.get().getList().get(oMinutiae.get().getList().get(i).getNbrs().get(j)).getY(),
-							oMinutiae.get().getList().get(oMinutiae.get().getList().get(i).getRidgeCounts().get(j))));
+							oMinutiae.get().getList().get(i).getRidgeCounts().get(j)));
 				}
 
 				myWriter.write("");
 			}
 
-			logger.info("dumpMinutiae::Successfully wrote to the file.");
+			logger.debug("dumpMinutiae::Successfully wrote to the file.");
 		} catch (IOException e) {
 			logger.error("An error occurred.", e);
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dumpMinutiaePoints - Given a oMinutiae list, writes the coordinate
-	 * point #cat: for each minutia in the list to the specified open #cat: file
-	 * pointer. Input: oMinutiae - list of minutia structures Output: file - open
-	 * file pointer
-	 **************************************************************************/
+	/**
+	 * Writes the number of minutiae followed by the coordinate point of each minutia to a file (debugging aid).
+	 *
+	 * <p>NIST origin: {@code dump_minutiae_pts()} in {@code minutia.c}. I/O errors are logged and not propagated.
+	 *
+	 * @param file      destination file (overwritten)
+	 * @param oMinutiae holder of the minutiae list to write
+	 */
 	public void dumpMinutiaePoints(File file, final AtomicReference<Minutiae> oMinutiae) {
 		try (FileWriter myWriter = new FileWriter(file.getAbsoluteFile())) {
 			/* First line in the output file contians the number of minutia */
@@ -633,20 +758,23 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 						oMinutiae.get().getList().get(i).getY()));
 			}
 
-			logger.info("dumpMinutiaePoints::Successfully wrote to the file.");
+			logger.debug("dumpMinutiaePoints::Successfully wrote to the file.");
 		} catch (IOException e) {
 			logger.error("An error occurred.", e);
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dumpReliableMinutiaePoints - Given a oMinutiae list, writes the #cat:
-	 * coordinate point for each oMinutiae in the list that has #cat: the specified
-	 * reliability to the specified open #cat: file pointer. Input: oMinutiae - list
-	 * of minutia structures reliability - desired reliability level for oMinutiae
-	 * to be reported Output: file - open file pointer
-	 **************************************************************************/
+	/**
+	 * Writes the coordinate points of the minutiae having a specific reliability to a file (debugging aid).
+	 *
+	 * <p>NIST origin: {@code dump_reliable_minutiae_pts()} in {@code minutia.c}. The count of qualifying minutiae
+	 * is written first, followed by one coordinate pair per qualifying minutia. I/O errors are logged and not
+	 * propagated.
+	 *
+	 * @param file        destination file (overwritten)
+	 * @param oMinutiae   holder of the minutiae list to examine
+	 * @param reliability reliability value a minutia must exactly match to be written
+	 */
 	public void dumpReliableMinutiaePoints(File file, AtomicReference<Minutiae> oMinutiae, final double reliability) {
 		try (FileWriter myWriter = new FileWriter(file.getAbsoluteFile())) {
 			int i;
@@ -674,25 +802,29 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 				}
 			}
 
-			logger.info("Successfully wrote to the file.");
+			logger.debug("Successfully wrote to the file.");
 		} catch (IOException e) {
 			logger.error("An error occurred.", e);
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: createMinutia - Takes attributes associated with a detected minutia
-	 * #cat: point and allocates and initializes a minutia structure. Input: xLoc -
-	 * x-pixel coord of minutia (interior to feature) yLoc - y-pixel coord of
-	 * minutia (interior to feature) xEdge - x-pixel coord of corresponding edge
-	 * pixel (exterior to feature) yEdge - y-pixel coord of corresponding edge pixel
-	 * (exterior to feature) iDir - integer direction of the minutia reliability -
-	 * floating point measure of minutia's reliability type - type of the minutia
-	 * (ridge-ending or bifurcation) appearing - designates the minutia as appearing
-	 * or disappearing featureId - index of minutia's matching feature_patterns[]
-	 * Output: Minutia - ponter to an allocated and initialized minutia structure
-	 *************************************************************************/
+	/**
+	 * Creates and initializes a {@link Minutia} from the attributes of a detected minutia point.
+	 *
+	 * <p>NIST origin: {@code create_minutia()} in {@code minutia.c}. Neighbor and ridge-count lists are left
+	 * unset ({@code null}) and the neighbor count is zero.
+	 *
+	 * @param xLoc        x-pixel coordinate of the minutia (interior to the feature)
+	 * @param yLoc        y-pixel coordinate of the minutia (interior to the feature)
+	 * @param xEdge       x-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param yEdge       y-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param iDir        integer direction of the minutia on the full circle
+	 * @param reliability floating-point measure of the minutia's reliability
+	 * @param type        type of the minutia ({@link ILfs#RIDGE_ENDING} or {@link ILfs#BIFURCATION})
+	 * @param appearing   whether the minutia is appearing ({@link ILfs#APPEARING}) or disappearing
+	 * @param featureId   index of the minutia's matching entry in the feature patterns table
+	 * @return the newly allocated and initialized minutia
+	 */
 	public Minutia createMinutia(final int xLoc, final int yLoc, final int xEdge, final int yEdge, final int iDir,
 			final double reliability, final int type, final int appearing, final int featureId) {
 		Minutia minutia = new Minutia();
@@ -714,13 +846,17 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return minutia;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeMinutia - Removes the specified minutia point from the input
-	 * #cat: list of minutiae. Input: index - position of minutia to be removed from
-	 * list oMinutiae - input list of minutiae Output: oMinutiae - list with minutia
-	 * removed Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes the minutia at the specified position from a minutiae list.
+	 *
+	 * <p>NIST origin: {@code remove_minutia()} in {@code minutia.c}. Subsequent entries are slid up one position,
+	 * the last slot is dropped and the minutiae count is decremented.
+	 *
+	 * @param index     position of the minutia to remove; expected to be in {@code [0, num)}
+	 * @param oMinutiae holder of the minutiae list; modified in place
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_380} (negative) if
+	 *         the index is reported out of range
+	 */
 	public int removeMinutia(final int index, AtomicReference<Minutiae> oMinutiae) {
 		int fromIndex;
 		int toIndex;
@@ -747,20 +883,26 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: joinMinutia - Takes 2 minutia points and connectes their features in
-	 * #cat: the input binary image. A line is drawn in the image #cat: between the
-	 * 2 minutia with a specified line-width radius #cat: and a conditional border
-	 * of pixels opposite in color #cat: from the interior line. Input: minutia1 -
-	 * first minutia point to be joined minutia2 - second minutia point to be joined
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * with_boundary - signifies the inclusion of border pixels line_radius -
-	 * line-width radius of join line Output: binarizedImageData - edited image with
-	 * minutia features joined Return Code: Zero - successful completion Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Connects the features of two minutia points by drawing a line between them in the binary image.
+	 *
+	 * <p>NIST origin: {@code join_minutia()} in {@code minutia.c}. The line is drawn in the minutia color
+	 * (black to join two ridge-endings, white to join two bifurcations) with the specified radial width,
+	 * widened vertically when {@code |dx| >= |dy|} and horizontally otherwise. If {@code with_boundary} is
+	 * non-zero, a one-pixel border of the opposite color is drawn on each side of the line. The end points
+	 * themselves are not rewritten.
+	 *
+	 * @param minutia1           first minutia point to be joined
+	 * @param minutia2           second minutia point to be joined
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; edited in
+	 *                           place with the features joined
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param with_boundary      non-zero to also draw boundary pixels of the opposite color
+	 * @param line_radius        line-width radius of the join line, in pixels
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error (e.g. from
+	 *         line point generation)
+	 */
 	public int joinMinutia(Minutia minutia1, Minutia minutia2, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, final int with_boundary, final int line_radius) {
 		int dxGreaterThandy;
@@ -889,14 +1031,16 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getMinutiaType - Given the pixel color of the detected feature, returns
-	 * #cat: whether the minutia is a ridge-ending (black pixel) or #cat:
-	 * bifurcation (white pixel). Input: featurePixel - pixel color of the feature's
-	 * interior Return Code: RIDGE_ENDING - minutia is a ridge-ending BIFURCATION -
-	 * minutia is a bifurcation (valley-ending)
-	 **************************************************************************/
+	/**
+	 * Classifies a minutia as ridge-ending or bifurcation from the pixel color of the detected feature.
+	 *
+	 * <p>NIST origin: {@code minutia_type()} in {@code minutia.c}. A black feature pixel denotes a ridge-ending;
+	 * a white feature pixel denotes a valley-ending, i.e. a bifurcation.
+	 *
+	 * @param featurePixel pixel color of the feature's interior ({@code 0} = white, {@code 1} = black)
+	 * @return {@link ILfs#RIDGE_ENDING} if the minutia is a ridge-ending; {@link ILfs#BIFURCATION} if it is a
+	 *         bifurcation (valley-ending)
+	 */
 	public int getMinutiaType(final int featurePixel) {
 		int type;
 
@@ -915,18 +1059,20 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (type);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: isMinutiaAppearing - Given the pixel location of a minutia feature
-	 * #cat: and its corresponding adjacent edge pixel, returns whether #cat: the
-	 * minutia is appearing or disappearing. Remeber, that #cat: "feature" refers to
-	 * either a ridge or valley-ending. Input: xLoc - x-pixel coord of feature
-	 * (interior to feature) yLoc - y-pixel coord of feature (interior to feature)
-	 * xEdge - x-pixel coord of corresponding edge pixel (exterior to feature) yEdge
-	 * - y-pixel coord of corresponding edge pixel (exterior to feature) Return
-	 * Code: APPEARING - minutia is appearing (TRUE==1) DISAPPEARING - minutia is
-	 * disappearing (FALSE==0) Negative - system error
-	 **************************************************************************/
+	/**
+	 * Determines whether a minutia is appearing or disappearing from the position of its edge pixel.
+	 *
+	 * <p>NIST origin: {@code is_minutia_appearing()} in {@code minutia.c}. A "feature" refers to either a ridge-
+	 * or valley-ending. The edge pixel is always N, S, E or W of the feature pixel: an edge preceding the feature
+	 * (smaller x, or smaller y) means appearing; an edge following it means disappearing.
+	 *
+	 * @param xLoc  x-pixel coordinate of the feature (interior to the feature)
+	 * @param yLoc  y-pixel coordinate of the feature (interior to the feature)
+	 * @param xEdge x-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param yEdge y-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @return {@link ILfs#APPEARING} (TRUE == 1) if the minutia is appearing; {@link ILfs#DISAPPEARING}
+	 *         (FALSE == 0) if disappearing; {@link ILfs#ERROR_CODE_240} (negative) for a bad pixel configuration
+	 */
 	public int isMinutiaAppearing(final int xLoc, final int yLoc, final int xEdge, final int yEdge) {
 		/* Edge pixels will always be N,S,E,W of feature pixel. */
 
@@ -955,15 +1101,18 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.ERROR_CODE_240);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: chooseScanDirection - Determines the orientation (horizontal or #cat:
-	 * vertical) in which a block is to be scanned for minutiae. #cat: The
-	 * orientation is based on the blocks corresponding IMAP #cat: direction. Input:
-	 * nInputBlockImageMapValue - Block's IMAP direction nDirs - number of possible
-	 * IMAP directions (within semicircle) Return Code: SCAN_HORIZONTAL - horizontal
-	 * orientation SCAN_VERTICAL - vertical orientation
-	 **************************************************************************/
+	/**
+	 * Determines the orientation (horizontal or vertical) in which a block is to be scanned for minutiae.
+	 *
+	 * <p>NIST origin: {@code choose_scan_direction()} in {@code minutia.c}. The scan is performed orthogonally to
+	 * the block's ridge flow: relatively vertical flow (direction within 45 degrees of vertical) is scanned
+	 * horizontally, relatively horizontal flow is scanned vertically.
+	 *
+	 * @param nInputBlockImageMapValue the block's IMAP (Direction Map) direction
+	 * @param nDirs                    number of possible IMAP directions within a semicircle
+	 * @return {@link ILfs#SCAN_HORIZONTAL} for horizontal orientation; {@link ILfs#SCAN_VERTICAL} for vertical
+	 *         orientation
+	 */
 	public int chooseScanDirection(final int nInputBlockImageMapValue, final int nDirs) {
 		int qtrNDirs;
 
@@ -984,24 +1133,33 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: scanForMinutiae - Scans a block of binary image data detecting
-	 * potential #cat: minutiae points. Input: binarizedImageData - binary image
-	 * data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image oInputBlockImageMap - matrix of
-	 * ridge flow directions oNMap - IMAP augmented with blocks of HIGH-CURVATURE
-	 * and blocks which have no neighboring valid directions. blockX - x-block coord
-	 * to be scanned blockY - y-block coord to be scanned mapWidth - width (in
-	 * blocks) of IMAP and NMAP matrices. mapHeight - height (in blocks) of IMAP and
-	 * NMAP matrices. scanX - x-pixel coord of origin of region to be scanned scanY
-	 * - y-pixel coord of origin of region to be scanned scanWidth - width (in
-	 * pixels) of region to be scanned scanHeight - height (in pixels) of region to
-	 * be scanned scanDir - the scan orientation (horizontal or vertical) lfsParams
-	 * - parameters and thresholds for controlling LFS Output: oMinutiae - points to
-	 * a list of detected minutia structures Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans one block of binary image data for potential minutia points (version 1 block-based detection).
+	 *
+	 * <p>NIST origin: {@code scan4minutiae()} in {@code minutia.c}. The block is scanned first in the primary
+	 * orientation {@code scanDir} and then partially rescanned in the orthogonal orientation according to its
+	 * neighbors' IMAP/NMAP values ({@link #rescanForMinutiaeVertically} or {@link #rescanForMinutiaeHorizontally}).
+	 *
+	 * @param oMinutiae           holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData  binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth          width of the image, in pixels
+	 * @param imageHeight         height of the image, in pixels
+	 * @param oInputBlockImageMap IMAP: matrix of block ridge flow directions
+	 * @param oNMap               NMAP: IMAP augmented with HIGH-CURVATURE blocks and blocks with no neighboring
+	 *                            valid directions
+	 * @param blockX              x-block coordinate of the block to be scanned
+	 * @param blockY              y-block coordinate of the block to be scanned
+	 * @param mapWidth            width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight           height (in blocks) of the IMAP and NMAP matrices
+	 * @param scanX               x-pixel coordinate of the origin of the region to be scanned
+	 * @param scanY               y-pixel coordinate of the origin of the region to be scanned
+	 * @param scanWidth           width (in pixels) of the region to be scanned
+	 * @param scanHeight          height (in pixels) of the region to be scanned
+	 * @param scanDir             primary scan orientation ({@link ILfs#SCAN_HORIZONTAL} or
+	 *                            {@link ILfs#SCAN_VERTICAL})
+	 * @param lfsParams           parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int scanForMinutiae(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, AtomicIntegerArray oInputBlockImageMap, AtomicIntegerArray oNMap, final int blockX,
 			final int blockY, final int mapWidth, final int mapHeight, final int scanX, final int scanY,
@@ -1053,25 +1211,28 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: scan4minutiae_horizontally - Scans a specified region of binary image
-	 * #cat: data horizontally, detecting potential minutiae points. #cat: Minutia
-	 * detected via the horizontal scan process are #cat: by nature vertically
-	 * oriented (orthogonal to the scan). #cat: The region actually scanned is
-	 * slightly larger than that #cat: specified. This overlap attempts to minimize
-	 * the number #cat: of minutiae missed at the region boundaries. #cat: HOWEVER,
-	 * some minutiae will still be missed! Input: binarizedImageData - binary image
-	 * data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image nInputBlockImageMapValue - IMAP
-	 * value associated with this image region nNMapValue - NMAP value associated
-	 * with this image region scanX - x-pixel coord of origin of region to be
-	 * scanned scanY - y-pixel coord of origin of region to be scanned scanWidth -
-	 * width (in pixels) of region to be scanned scanHeight - height (in pixels) of
-	 * region to be scanned lfsParams - parameters and thresholds for controlling
-	 * LFS Output: oMinutiae - points to a list of detected minutia structures
-	 * Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans a region of binary image data horizontally for potential minutia points.
+	 *
+	 * <p>NIST origin: {@code scan4minutiae_horizontally()} in {@code minutia.c}. Pairs of adjacent rows are
+	 * walked and the vertical pixel-pair sequences matched against the feature patterns; each match is handed
+	 * to {@link #processHorizontalScanMinutia}. Minutiae detected this way are by nature vertically oriented
+	 * (orthogonal to the scan). The scanned region is enlarged by 2 pixel columns left and right and 1 row below
+	 * to reduce misses at region boundaries, but some minutiae straddling boundaries may still be missed.
+	 *
+	 * @param oMinutiae                holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData       binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth               width of the image, in pixels
+	 * @param imageHeight              height of the image, in pixels
+	 * @param nInputBlockImageMapValue IMAP value associated with this image region
+	 * @param nNMapValue               NMAP value associated with this image region
+	 * @param scanX                    x-pixel coordinate of the origin of the region to be scanned
+	 * @param scanY                    y-pixel coordinate of the origin of the region to be scanned
+	 * @param scanWidth                width (in pixels) of the region to be scanned
+	 * @param scanHeight               height (in pixels) of the region to be scanned
+	 * @param lfsParams                parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int scanForMinutiaeHorizontally(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, final int nInputBlockImageMapValue, final int nNMapValue,
 			final int scanX, final int scanY, final int scanWidth, final int scanHeight, final LfsParams lfsParams) {
@@ -1122,7 +1283,7 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 					/* Bump forward to next scan pixel pair. */
 					cx.set(cx.get() + 1);
 					p1ptrIndex.set(p1ptrIndex.get() + 1);
-					p2ptrIndex.set(p1ptrIndex.get() + 1);
+					p2ptrIndex.set(p2ptrIndex.get() + 1);
 					/* If not at end of region's current scan row... */
 					if (cx.get() < ex) {
 						/* If scan pixel pair matches second pixel pair of */
@@ -1188,19 +1349,24 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: scan4minutiae_horizontally_V2 - Scans an entire binary image #cat:
-	 * horizontally, detecting potential minutiae points. #cat: Minutia detected via
-	 * the horizontal scan process are #cat: by nature vertically oriented
-	 * (orthogonal to the scan). Input: binarizedImageData - binary image data
-	 * (0==while & 1==black) imageWidth - width (in pixels) of image imageHeight -
-	 * height (in pixels) of image oDirectionMap - pixelized Direction Map
-	 * oLowFlowMap - pixelized Low Ridge Flow Map oHighCurveMap - pixelized High
-	 * Curvature Map lfsParams - parameters and thresholds for controlling LFS
-	 * Output: minutiae - points to a list of detected minutia structures Return
-	 * Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans the entire binary image horizontally for potential minutia points.
+	 *
+	 * <p>NIST origin: {@code scan4minutiae_horizontally_V2()} in {@code minutia.c}. Pairs of adjacent rows are
+	 * walked over the whole image and pixel-pair sequences matched against the feature patterns; each match is
+	 * handed to {@link #processHorizontalScanMinutiaV2}. Minutiae detected this way are by nature vertically
+	 * oriented (orthogonal to the scan).
+	 *
+	 * @param oMinutiae          holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oDirectionMap      pixelized Direction Map (one value per pixel)
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map
+	 * @param oHighCurveMap      pixelized High Curvature Map
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int scanForMinutiaeHorizontallyV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray oDirectionMap,
 			AtomicIntegerArray oLowFlowMap, AtomicIntegerArray oHighCurveMap, final LfsParams lfsParams) {
@@ -1311,25 +1477,29 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: scan4minutiae_vertically - Scans a specified region of binary image
-	 * data #cat: vertically, detecting potential minutiae points. #cat: Minutia
-	 * detected via the vetical scan process are #cat: by nature horizontally
-	 * oriented (orthogonal to the scan). #cat: The region actually scanned is
-	 * slightly larger than that #cat: specified. This overlap attempts to minimize
-	 * the number #cat: of minutiae missed at the region boundaries. #cat: HOWEVER,
-	 * some minutiae will still be missed! Input: binarizedImageData - binary image
-	 * data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image nInputBlockImageMapValue - IMAP
-	 * value associated with this image region nNMapValue - NMAP value associated
-	 * with this image region scanX - x-pixel coord of origin of region to be
-	 * scanned scanY - y-pixel coord of origin of region to be scanned scanWidth -
-	 * width (in pixels) of region to be scanned scanHeight - height (in pixels) of
-	 * region to be scanned lfsParams - parameters and thresholds for controlling
-	 * LFS Output: minutiae - points to a list of detected minutia structures Return
-	 * Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans a region of binary image data vertically for potential minutia points.
+	 *
+	 * <p>NIST origin: {@code scan4minutiae_vertically()} in {@code minutia.c}. Pairs of adjacent columns are
+	 * walked and the horizontal pixel-pair sequences matched against the feature patterns; each match is handed
+	 * to {@link #processVerticalScanMinutia}. Minutiae detected this way are by nature horizontally oriented
+	 * (orthogonal to the scan). The scanned region is enlarged by 1 pixel column to the right and 2 rows above
+	 * and below to reduce misses at region boundaries, but some minutiae straddling boundaries may still be
+	 * missed.
+	 *
+	 * @param minutiae                 holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData       binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth               width of the image, in pixels
+	 * @param imageHeight              height of the image, in pixels
+	 * @param nInputBlockImageMapValue IMAP value associated with this image region
+	 * @param nNMapValue               NMAP value associated with this image region
+	 * @param scanX                    x-pixel coordinate of the origin of the region to be scanned
+	 * @param scanY                    y-pixel coordinate of the origin of the region to be scanned
+	 * @param scanWidth                width (in pixels) of the region to be scanned
+	 * @param scanHeight               height (in pixels) of the region to be scanned
+	 * @param lfsParams                parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int scanForMinutiaeVertically(AtomicReference<Minutiae> minutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, final int nInputBlockImageMapValue, final int nNMapValue,
 			final int scanX, final int scanY, final int scanWidth, final int scanHeight, final LfsParams lfsParams) {
@@ -1439,32 +1609,38 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 				}
 			} // While not at end of current scan column.
 			/* Bump forward to next scan column. */
-			cx.set(cx.get() - 1);
+			cx.set(cx.get() + 1);
 		} // While not out of scan columns.
 
 		/* Return normally. */
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: rescanForMinutiaeHorizontally - Rescans portions of a block of binary
-	 * #cat: image data horizontally for potential minutiae. The areas #cat:
-	 * rescanned within the block are based on the current #cat: block's neighboring
-	 * blocks' IMAP and NMAP values. Input: binarizedImageData - binary image data
-	 * (0==while & 1==black) imageWidth - width (in pixels) of image imageHeight -
-	 * height (in pixels) of image oInputBlockImageMap - matrix of ridge flow
-	 * directions oNMap - IMAP augmented with blocks of HIGH-CURVATURE and blocks
-	 * which have no neighboring valid directions. blockX - x-block coord to be
-	 * rescanned blockY - y-block coord to be rescanned mapWidth - width (in blocks)
-	 * of IMAP and NMAP matrices. mapHeight - height (in blocks) of IMAP and NMAP
-	 * matrices. scanX - x-pixel coord of origin of region to be rescanned scanY -
-	 * y-pixel coord of origin of region to be rescanned scanWidth - width (in
-	 * pixels) of region to be rescanned scanHeight - height (in pixels) of region
-	 * to be rescanned lfsParams - parameters and thresholds for controlling LFS
-	 * Output: oMinutiae - points to a list of detected minutia structures Return
-	 * Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Rescans portions of a block horizontally for potential minutiae, based on its neighbors' IMAP/NMAP values.
+	 *
+	 * <p>NIST origin: {@code rescan4minutiae_horizontally()} in {@code minutia.c}. A HIGH-CURVATURE block is
+	 * rescanned entirely; otherwise each of the NORTH, EAST, SOUTH and WEST neighbors is considered in turn via
+	 * {@link #rescanPartialHorizontally}.
+	 *
+	 * @param oMinutiae           holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData  binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth          width of the image, in pixels
+	 * @param imageHeight         height of the image, in pixels
+	 * @param oInputBlockImageMap IMAP: matrix of block ridge flow directions
+	 * @param oNMap               NMAP: IMAP augmented with HIGH-CURVATURE blocks and blocks with no neighboring
+	 *                            valid directions
+	 * @param blockX              x-block coordinate of the block to be rescanned
+	 * @param blockY              y-block coordinate of the block to be rescanned
+	 * @param mapWidth            width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight           height (in blocks) of the IMAP and NMAP matrices
+	 * @param scanX               x-pixel coordinate of the origin of the region to be rescanned
+	 * @param scanY               y-pixel coordinate of the origin of the region to be rescanned
+	 * @param scanWidth           width (in pixels) of the region to be rescanned
+	 * @param scanHeight          height (in pixels) of the region to be rescanned
+	 * @param lfsParams           parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int rescanForMinutiaeHorizontally(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray oInputBlockImageMap,
 			AtomicIntegerArray oNMap, final int blockX, final int blockY, final int mapWidth, final int mapHeight,
@@ -1523,20 +1699,24 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: scanForMinutiaeVerticallyV2 - Scans an entire binary image #cat:
-	 * vertically, detecting potential minutiae points. #cat: Minutia detected via
-	 * the vetical scan process are #cat: by nature horizontally oriented
-	 * (orthogonal to the scan). Input: binarizedImageData - binary image data
-	 * (0==while & 1==black) imageWidth - width (in pixels) of image imageHeight -
-	 * height (in pixels) of image Maps -- contains all below information
-	 * oDirectionMap - pixelized Direction Map oLowFlowMap - pixelized Low Ridge
-	 * Flow Map oHighCurveMap - pixelized High Curvature Map lfsParams - parameters
-	 * and thresholds for controlling LFS Output: oMinutiae - points to a list of
-	 * detected minutia structures Return Code: Zero - successful completion
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Scans the entire binary image vertically for potential minutia points.
+	 *
+	 * <p>NIST origin: {@code scan4minutiae_vertically_V2()} in {@code minutia.c}. Pairs of adjacent columns are
+	 * walked over the whole image and pixel-pair sequences matched against the feature patterns; each match is
+	 * handed to {@link #processVerticalScanMinutiaV2}. Minutiae detected this way are by nature horizontally
+	 * oriented (orthogonal to the scan).
+	 *
+	 * @param oMinutiae          holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oDirectionMap      pixelized Direction Map (one value per pixel)
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map
+	 * @param oHighCurveMap      pixelized High Curvature Map
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int scanForMinutiaeVerticallyV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray oDirectionMap,
 			AtomicIntegerArray oLowFlowMap, AtomicIntegerArray oHighCurveMap, final LfsParams lfsParams) {
@@ -1643,25 +1823,31 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: rescanForMinutiaeVertically - Rescans portions of a block of binary
-	 * #cat: image data vertically for potential minutiae. The areas #cat: rescanned
-	 * within the block are based on the current #cat: block's neighboring blocks'
-	 * IMAP and NMAP values. Input: binarizedImageData - binary image data (0==while
-	 * & 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image oInputBlockImageMap - matrix of ridge flow directions oNMap
-	 * - IMAP augmented with blocks of HIGH-CURVATURE and blocks which have no
-	 * neighboring valid directions. blockX - x-block coord to be rescanned blockY -
-	 * y-block coord to be rescanned mapWidth - width (in blocks) of IMAP and NMAP
-	 * matrices. mapHeight - height (in blocks) of IMAP and NMAP matrices. scanX -
-	 * x-pixel coord of origin of region to be rescanned scanY - y-pixel coord of
-	 * origin of region to be rescanned scanWidth - width (in pixels) of region to
-	 * be rescanned scanHeight - height (in pixels) of region to be rescanned
-	 * lfsParams - parameters and thresholds for controlling LFS Output: minutiae -
-	 * points to a list of detected minutia structures Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Rescans portions of a block vertically for potential minutiae, based on its neighbors' IMAP/NMAP values.
+	 *
+	 * <p>NIST origin: {@code rescan4minutiae_vertically()} in {@code minutia.c}. A HIGH-CURVATURE block is
+	 * rescanned entirely; otherwise each of the NORTH, EAST, SOUTH and WEST neighbors is considered in turn via
+	 * {@link #rescanPartialVertically}.
+	 *
+	 * @param minutiae            holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData  binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth          width of the image, in pixels
+	 * @param imageHeight         height of the image, in pixels
+	 * @param oInputBlockImageMap IMAP: matrix of block ridge flow directions
+	 * @param oNMap               NMAP: IMAP augmented with HIGH-CURVATURE blocks and blocks with no neighboring
+	 *                            valid directions
+	 * @param blockX              x-block coordinate of the block to be rescanned
+	 * @param blockY              y-block coordinate of the block to be rescanned
+	 * @param mapWidth            width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight           height (in blocks) of the IMAP and NMAP matrices
+	 * @param scanX               x-pixel coordinate of the origin of the region to be rescanned
+	 * @param scanY               y-pixel coordinate of the origin of the region to be rescanned
+	 * @param scanWidth           width (in pixels) of the region to be rescanned
+	 * @param scanHeight          height (in pixels) of the region to be rescanned
+	 * @param lfsParams           parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int rescanForMinutiaeVertically(AtomicReference<Minutiae> minutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray oInputBlockImageMap,
 			AtomicIntegerArray oNMap, final int blockX, final int blockY, final int mapWidth, final int mapHeight,
@@ -1720,24 +1906,34 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: rescanPartialHorizontally - Rescans a portion of a block of binary
-	 * #cat: image data horizontally based on the IMAP and NMAP values #cat: of a
-	 * specified neighboring block. Input: nbrDir - specifies which block neighbor
-	 * {NORTH, SOUTH, EAST, WEST} binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image oInputBlockImageMap - matrix of ridge flow directions oNMap
-	 * - IMAP augmented with blocks of HIGH-CURVATURE and blocks which have no
-	 * neighboring valid directions. blockX - x-block coord to be rescanned blockY -
-	 * y-block coord to be rescanned mapWidth - width (in blocks) of IMAP and NMAP
-	 * matrices. mapHeight - height (in blocks) of IMAP and NMAP matrices. scanX -
-	 * x-pixel coord of origin of image region scanY - y-pixel coord of origin of
-	 * image region scanWidth - width (in pixels) of image region scanHeight -
-	 * height (in pixels) of image region lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oMinutiae - points to a list of detected minutia
-	 * structures Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Rescans part of a block horizontally according to the IMAP/NMAP values of one neighboring block.
+	 *
+	 * <p>NIST origin: {@code rescan_partial_horizontally()} in {@code minutia.c}. If the neighbor exists and has
+	 * a VALID direction whose compatible scan direction ({@link #chooseScanDirection}) is horizontal, the half of
+	 * the block adjacent to that neighbor (computed by {@link #adjustHorizontalRescan}) is rescanned with
+	 * {@link #scanForMinutiaeHorizontally}. Missing neighbors are silently skipped.
+	 *
+	 * @param nbrDir              which neighbor to consider: {@link ILfs#NORTH}, {@link ILfs#SOUTH},
+	 *                            {@link ILfs#EAST} or {@link ILfs#WEST}
+	 * @param oMinutiae           holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData  binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth          width of the image, in pixels
+	 * @param imageHeight         height of the image, in pixels
+	 * @param oInputBlockImageMap IMAP: matrix of block ridge flow directions
+	 * @param oNMap               NMAP: IMAP augmented with HIGH-CURVATURE blocks and blocks with no neighboring
+	 *                            valid directions
+	 * @param blockX              x-block coordinate of the block to be rescanned
+	 * @param blockY              y-block coordinate of the block to be rescanned
+	 * @param mapWidth            width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight           height (in blocks) of the IMAP and NMAP matrices
+	 * @param scanX               x-pixel coordinate of the origin of the image region
+	 * @param scanY               y-pixel coordinate of the origin of the image region
+	 * @param scanWidth           width (in pixels) of the image region
+	 * @param scanHeight          height (in pixels) of the image region
+	 * @param lfsParams           parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int rescanPartialHorizontally(final int nbrDir, AtomicReference<Minutiae> oMinutiae,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			AtomicIntegerArray oInputBlockImageMap, AtomicIntegerArray oNMap, final int blockX, final int blockY,
@@ -1804,24 +2000,34 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: rescanPartialVertically - Rescans a portion of a block of binary #cat:
-	 * image data vertically based on the IMAP and NMAP values #cat: of a specified
-	 * neighboring block. Input: nbrDir - specifies which block neighbor {NORTH,
-	 * SOUTH, EAST, WEST} binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image oInputBlockImageMap - matrix of ridge flow directions oNMap
-	 * - IMAP augmented with blocks of HIGH-CURVATURE and blocks which have no
-	 * neighboring valid directions. blockX - x-block coord to be rescanned blockY -
-	 * y-block coord to be rescanned mapWidth - width (in blocks) of IMAP and NMAP
-	 * matrices. mapHeight - height (in blocks) of IMAP and NMAP matrices. scanX -
-	 * x-pixel coord of origin of image region scanY - y-pixel coord of origin of
-	 * image region scanWidth - width (in pixels) of image region scanHeight -
-	 * height (in pixels) of image region lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oMinutiae - points to a list of detected minutia
-	 * structures Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Rescans part of a block vertically according to the IMAP/NMAP values of one neighboring block.
+	 *
+	 * <p>NIST origin: {@code rescan_partial_vertically()} in {@code minutia.c}. If the neighbor exists and has a
+	 * VALID direction whose compatible scan direction ({@link #chooseScanDirection}) is vertical, the half of the
+	 * block adjacent to that neighbor (computed by {@link #adjustVerticalRescan}) is rescanned with
+	 * {@link #scanForMinutiaeVertically}. Missing neighbors are silently skipped.
+	 *
+	 * @param nbrDir              which neighbor to consider: {@link ILfs#NORTH}, {@link ILfs#SOUTH},
+	 *                            {@link ILfs#EAST} or {@link ILfs#WEST}
+	 * @param oMinutiae           holder of the minutiae list; detected minutiae are added to it
+	 * @param binarizedImageData  binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth          width of the image, in pixels
+	 * @param imageHeight         height of the image, in pixels
+	 * @param oInputBlockImageMap IMAP: matrix of block ridge flow directions
+	 * @param oNMap               NMAP: IMAP augmented with HIGH-CURVATURE blocks and blocks with no neighboring
+	 *                            valid directions
+	 * @param blockX              x-block coordinate of the block to be rescanned
+	 * @param blockY              y-block coordinate of the block to be rescanned
+	 * @param mapWidth            width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight           height (in blocks) of the IMAP and NMAP matrices
+	 * @param scanX               x-pixel coordinate of the origin of the image region
+	 * @param scanY               y-pixel coordinate of the origin of the image region
+	 * @param scanWidth           width (in pixels) of the image region
+	 * @param scanHeight          height (in pixels) of the image region
+	 * @param lfsParams           parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int rescanPartialVertically(final int nbrDir, AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray oInputBlockImageMap,
 			AtomicIntegerArray oNMap, final int blockX, final int blockY, final int mapWidth, final int mapHeight,
@@ -1886,17 +2092,22 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getNbrBlockIndex - Determines the block index (if one exists) #cat: for
-	 * a specified neighbor of a block in the image. Input: nbrDir - specifies which
-	 * block neighbor {NORTH, SOUTH, EAST, WEST} blockX - x-block coord to find
-	 * neighbor of blockY - y-block coord to find neighbor of mapWidth - width (in
-	 * blocks) of IMAP and NMAP matrices. mapHeight - height (in blocks) of IMAP and
-	 * NMAP matrices. Output: oBlockIndex - points to neighbor's block index Return
-	 * Code: NOT_FOUND - neighbor index does not exist FOUND - neighbor index exists
-	 * and returned Negative - system error
-	 **************************************************************************/
+	/**
+	 * Determines the block index (if one exists) of a specified neighbor of a block.
+	 *
+	 * <p>NIST origin: {@code get_nbr_block_index()} in {@code minutia.c}.
+	 *
+	 * @param oBlockIndex receives the neighbor's 1-D block index ({@code ny * mapWidth + nx}) when found
+	 * @param nbrDir      which neighbor: {@link ILfs#NORTH}, {@link ILfs#SOUTH}, {@link ILfs#EAST} or
+	 *                    {@link ILfs#WEST}
+	 * @param blockX      x-block coordinate of the block whose neighbor is sought
+	 * @param blockY      y-block coordinate of the block whose neighbor is sought
+	 * @param mapWidth    width (in blocks) of the IMAP and NMAP matrices
+	 * @param mapHeight   height (in blocks) of the IMAP and NMAP matrices
+	 * @return {@link ILfs#FOUND} if the neighbor exists and its index was returned; {@link ILfs#NOT_FOUND} if the
+	 *         neighbor lies outside the map; {@link ILfs#ERROR_CODE_200} (negative) for an illegal neighbor
+	 *         direction
+	 */
 	public int getNbrBlockIndex(AtomicInteger oBlockIndex, final int nbrDir, final int blockX, final int blockY,
 			final int mapWidth, final int mapHeight) {
 		int nx;
@@ -1952,20 +2163,26 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FOUND);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: adjustHorizontalRescan - Determines the portion of an image block to
-	 * #cat: be rescanned horizontally based on a specified neighbor. Input: nbrDir
-	 * - specifies which block neighbor {NORTH, SOUTH, EAST, WEST} scanX - x-pixel
-	 * coord of origin of image region scanY - y-pixel coord of origin of image
-	 * region scanWidth - width (in pixels) of image region scanHeight - height (in
-	 * pixels) of image region blocksize - dimension of image blocks (in pixels)
-	 * Output: rescanX - x-pixel coord of origin of region to be rescanned rescanY -
-	 * y-pixel coord of origin of region to be rescanned rescanWidth - width (in
-	 * pixels) of region to be rescanned rescanHeight - height (in pixels) of region
-	 * to be rescanned Return Code: Zero - successful completion Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Determines the portion of an image block to be rescanned horizontally for a specified neighbor.
+	 *
+	 * <p>NIST origin: {@code adjust_horizontal_rescan()} in {@code minutia.c}. The rescan region is the part of
+	 * the block nearest the given neighbor, computed from half and quarter of {@code blocksize}.
+	 *
+	 * @param nbrDir       which neighbor: {@link ILfs#NORTH}, {@link ILfs#SOUTH}, {@link ILfs#EAST} or
+	 *                     {@link ILfs#WEST}
+	 * @param rescanX      receives the x-pixel coordinate of the origin of the region to be rescanned
+	 * @param rescanY      receives the y-pixel coordinate of the origin of the region to be rescanned
+	 * @param rescanWidth  receives the width (in pixels) of the region to be rescanned
+	 * @param rescanHeight receives the height (in pixels) of the region to be rescanned
+	 * @param scanX        x-pixel coordinate of the origin of the image region
+	 * @param scanY        y-pixel coordinate of the origin of the image region
+	 * @param scanWidth    width (in pixels) of the image region
+	 * @param scanHeight   height (in pixels) of the image region
+	 * @param blocksize    dimension of image blocks, in pixels
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_210} (negative) for an
+	 *         illegal neighbor direction
+	 */
 	public int adjustHorizontalRescan(final int nbrDir, AtomicInteger rescanX, AtomicInteger rescanY,
 			AtomicInteger rescanWidth, AtomicInteger rescanHeight, final int scanX, final int scanY,
 			final int scanWidth, final int scanHeight, final int blocksize) {
@@ -2052,20 +2269,26 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: adjustVerticalRescan - Determines the portion of an image block to
-	 * #cat: be rescanned vertically based on a specified neighbor. Input: nbrDir -
-	 * specifies which block neighbor {NORTH, SOUTH, EAST, WEST} scanX - x-pixel
-	 * coord of origin of image region scanY - y-pixel coord of origin of image
-	 * region scanWidth - width (in pixels) of image region scanHeight - height (in
-	 * pixels) of image region blocksize - dimension of image blocks (in pixels)
-	 * Output: rescanX - x-pixel coord of origin of region to be rescanned rescanY -
-	 * y-pixel coord of origin of region to be rescanned rescanWidth - width (in
-	 * pixels) of region to be rescanned rescanHeight - height (in pixels) of region
-	 * to be rescanned Return Code: Zero - successful completion Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Determines the portion of an image block to be rescanned vertically for a specified neighbor.
+	 *
+	 * <p>NIST origin: {@code adjust_vertical_rescan()} in {@code minutia.c}. The rescan region is the part of the
+	 * block nearest the given neighbor, computed from half and quarter of {@code blocksize}.
+	 *
+	 * @param nbrDir       which neighbor: {@link ILfs#NORTH}, {@link ILfs#SOUTH}, {@link ILfs#EAST} or
+	 *                     {@link ILfs#WEST}
+	 * @param rescanX      receives the x-pixel coordinate of the origin of the region to be rescanned
+	 * @param rescanY      receives the y-pixel coordinate of the origin of the region to be rescanned
+	 * @param rescanWidth  receives the width (in pixels) of the region to be rescanned
+	 * @param rescanHeight receives the height (in pixels) of the region to be rescanned
+	 * @param scanX        x-pixel coordinate of the origin of the image region
+	 * @param scanY        y-pixel coordinate of the origin of the image region
+	 * @param scanWidth    width (in pixels) of the image region
+	 * @param scanHeight   height (in pixels) of the image region
+	 * @param blocksize    dimension of image blocks, in pixels
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_220} (negative) for an
+	 *         illegal neighbor direction
+	 */
 	public int adjustVerticalRescan(final int nbrDir, AtomicInteger rescanX, AtomicInteger rescanY,
 			AtomicInteger rescanWidth, AtomicInteger rescanHeight, final int scanX, final int scanY,
 			final int scanWidth, final int scanHeight, final int blocksize) {
@@ -2152,25 +2375,30 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processHorizontalScanMinutia - Takes a minutia point that was #cat:
-	 * detected via the horizontal scan process and #cat: adjusts its location (if
-	 * necessary), determines its #cat: direction, and (if it is not already in the
-	 * minutiae #cat: list) adds it to the list. These minutia are by nature #cat:
-	 * vertical in orientation (orthogonal to the scan). Input: cx - x-pixel coord
-	 * where 3rd pattern pair of mintuia was detected cy - y-pixel coord where 3rd
-	 * pattern pair of mintuia was detected y2 - y-pixel coord where 2nd pattern
-	 * pair of mintuia was detected featureId - type of minutia (ex. index into
-	 * feature_patterns[] list) binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image nInputBlockImageMapValue - IMAP value associated with this
-	 * image region nNMapValue - NMAP value associated with this image region
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * points to a list of detected minutia structures Return Code: Zero -
-	 * successful completion IGNORE - minutia is to be ignored Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Converts a feature found by the horizontal scan into a minutia and adds it to the list if new.
+	 *
+	 * <p>NIST origin: {@code process_horizontal_scan_minutia()} in {@code minutia.c}. The x location is set half
+	 * way between the start of the second pattern pair and the third pair; the y location and edge pixel are
+	 * taken from the two scan rows depending on whether the feature is appearing or disappearing. In
+	 * HIGH-CURVATURE blocks location and direction are refined by {@link #adjustHighCurvatureMinutia}; otherwise
+	 * the direction is derived from the block direction by {@link #getLowCurvatureDirection}. Minutiae detected
+	 * here are vertical in orientation (orthogonal to the scan) and get {@link ILfs#DEFAULT_RELIABILITY}.
+	 *
+	 * @param oMinutiae                holder of the minutiae list; the minutia is added to it when new
+	 * @param cx                       x-pixel coordinate where the 3rd pattern pair of the minutia was detected
+	 * @param cy                       y-pixel coordinate of the first of the two scan rows
+	 * @param x2                       x-pixel coordinate where the 2nd pattern pair of the minutia was detected
+	 * @param featureId                type of minutia (index into the feature patterns table)
+	 * @param binarizedImageData       binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth               width of the image, in pixels
+	 * @param imageHeight              height of the image, in pixels
+	 * @param nInputBlockImageMapValue IMAP value associated with this image region
+	 * @param nNMapValue               NMAP value associated with this image region
+	 * @param lfsParams                parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#IGNORE} if the minutia is to be
+	 *         ignored; a negative value on system error
+	 */
 	public int processHorizontalScanMinutia(AtomicReference<Minutiae> oMinutiae, final int cx, final int cy,
 			final int x2, final int featureId, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			final int nInputBlockImageMapValue, final int nNMapValue, final LfsParams lfsParams) {
@@ -2242,25 +2470,31 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processHorizontalScanMinutiaV2 - Takes a minutia point that was #cat:
-	 * detected via the horizontal scan process and #cat: adjusts its location (if
-	 * necessary), determines its #cat: direction, and (if it is not already in the
-	 * minutiae #cat: list) adds it to the list. These minutia are by nature #cat:
-	 * vertical in orientation (orthogonal to the scan). Input: cx - x-pixel coord
-	 * where 3rd pattern pair of mintuia was detected cy - y-pixel coord where 3rd
-	 * pattern pair of mintuia was detected y2 - y-pixel coord where 2nd pattern
-	 * pair of mintuia was detected featureId - type of minutia (ex. index into
-	 * feature_patterns[] list) binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image Maps - map oDirectionMap - pixelized Direction Map
-	 * oLowFlowMap - pixelized Low Ridge Flow Map oHighCurveMap - pixelized High
-	 * Curvature Map lfsParams - parameters and thresholds for controlling LFS
-	 * Output: minutiae - points to a list of detected minutia structures Return
-	 * Code: Zero - successful completion IGNORE - minutia is to be ignored Negative
-	 * - system error
-	 **************************************************************************/
+	/**
+	 * Converts a feature found by the full-image horizontal scan into a minutia and adds it to the list if new.
+	 *
+	 * <p>NIST origin: {@code process_horizontal_scan_minutia_V2()} in {@code minutia.c}. Location is derived as
+	 * in {@link #processHorizontalScanMinutia}. Points in blocks with INVALID direction are ignored. In HIGH
+	 * CURVATURE blocks location and direction are refined by {@link #adjustHighCurvatureMinutiaV2}; otherwise the
+	 * direction comes from {@link #getLowCurvatureDirection}. Reliability is {@link ILfs#MEDIUM_RELIABILITY} in
+	 * LOW RIDGE FLOW blocks and {@link ILfs#HIGH_RELIABILITY} elsewhere. The minutia is then offered to
+	 * {@link #updateMinutiaeV2} with {@link ILfs#SCAN_HORIZONTAL}.
+	 *
+	 * @param oMinutiae          holder of the minutiae list; the minutia is added to it when new
+	 * @param cx                 x-pixel coordinate where the 3rd pattern pair of the minutia was detected
+	 * @param cy                 y-pixel coordinate of the first of the two scan rows
+	 * @param x2                 x-pixel coordinate where the 2nd pattern pair of the minutia was detected
+	 * @param featureId          type of minutia (index into the feature patterns table)
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oDirectionMap      pixelized Direction Map
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map
+	 * @param oHighCurveMap      pixelized High Curvature Map
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#IGNORE} if the minutia is to be
+	 *         ignored; a negative value on system error
+	 */
 	public int processHorizontalScanMinutiaV2(AtomicReference<Minutiae> oMinutiae, final int cx, final int cy,
 			final int x2, final int featureId, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowFlowMap, AtomicIntegerArray oHighCurveMap,
@@ -2360,25 +2594,30 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processVerticalScanMinutia - Takes a minutia point that was #cat:
-	 * detected in via the vertical scan process and #cat: adjusts its location (if
-	 * necessary), determines its #cat: direction, and (if it is not already in the
-	 * minutiae #cat: list) adds it to the list. These minutia are by nature #cat:
-	 * horizontal in orientation (orthogonal to the scan). Input: cx - x-pixel coord
-	 * where 3rd pattern pair of mintuia was detected cy - y-pixel coord where 3rd
-	 * pattern pair of mintuia was detected x2 - x-pixel coord where 2nd pattern
-	 * pair of mintuia was detected featureId - type of minutia (ex. index into
-	 * feature_patterns[] list) binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image nInputBlockImageMapValue - IMAP value associated with this
-	 * image region nNMapValue - NMAP value associated with this image region
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * points to a list of detected minutia structures Return Code: Zero -
-	 * successful completion IGNORE - minutia is to be ignored Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Converts a feature found by the vertical scan into a minutia and adds it to the list if new.
+	 *
+	 * <p>NIST origin: {@code process_vertical_scan_minutia()} in {@code minutia.c}. The y location is set half
+	 * way between the start of the second pattern pair and the third pair; the x location and edge pixel are
+	 * taken from the two scan columns depending on whether the feature is appearing or disappearing. In
+	 * HIGH-CURVATURE blocks location and direction are refined by {@link #adjustHighCurvatureMinutia}; otherwise
+	 * the direction is derived by {@link #getLowCurvatureDirection}. Minutiae detected here are horizontal in
+	 * orientation (orthogonal to the scan) and get {@link ILfs#DEFAULT_RELIABILITY}.
+	 *
+	 * @param oMinutiae                holder of the minutiae list; the minutia is added to it when new
+	 * @param cx                       x-pixel coordinate of the first of the two scan columns
+	 * @param cy                       y-pixel coordinate where the 3rd pattern pair of the minutia was detected
+	 * @param y2                       y-pixel coordinate where the 2nd pattern pair of the minutia was detected
+	 * @param featureId                type of minutia (index into the feature patterns table)
+	 * @param binarizedImageData       binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth               width of the image, in pixels
+	 * @param imageHeight              height of the image, in pixels
+	 * @param nInputBlockImageMapValue IMAP value associated with this image region
+	 * @param nNMapValue               NMAP value associated with this image region
+	 * @param lfsParams                parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#IGNORE} if the minutia is to be
+	 *         ignored; a negative value on system error
+	 */
 	public int processVerticalScanMinutia(AtomicReference<Minutiae> oMinutiae, final int cx, final int cy, final int y2,
 			final int featureId, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			final int nInputBlockImageMapValue, final int nNMapValue, final LfsParams lfsParams) {
@@ -2412,7 +2651,7 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		/* third feature pair. */
 		yLoc.set((cy + y2) >> 1);
 		/* Set same y location to neighboring edge pixel. */
-		yEdge = yLoc;
+		yEdge.set(yLoc.get());
 
 		/* If current minutia is in a high-curvature block... */
 		if (nNMapValue == ILfs.HIGH_CURVATURE) {
@@ -2449,25 +2688,31 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processVerticalScanMinutiaV2 - Takes a minutia point that was #cat:
-	 * detected in via the vertical scan process and #cat: adjusts its location (if
-	 * necessary), determines its #cat: direction, and (if it is not already in the
-	 * minutiae #cat: list) adds it to the list. These minutia are by nature #cat:
-	 * horizontal in orientation (orthogonal to the scan). Input: cx - x-pixel coord
-	 * where 3rd pattern pair of mintuia was detected cy - y-pixel coord where 3rd
-	 * pattern pair of mintuia was detected x2 - x-pixel coord where 2nd pattern
-	 * pair of mintuia was detected featureId - type of minutia (ex. index into
-	 * feature_patterns[] list) binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image oDirectionMap - pixelized Direction Map oLowFlowMap -
-	 * pixelized Low Ridge Flow Map oHighCurveMap - pixelized High Curvature Map
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * points to a list of detected minutia structures Return Code: Zero -
-	 * successful completion IGNORE - minutia is to be ignored Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Converts a feature found by the full-image vertical scan into a minutia and adds it to the list if new.
+	 *
+	 * <p>NIST origin: {@code process_vertical_scan_minutia_V2()} in {@code minutia.c}. Location is derived as in
+	 * {@link #processVerticalScanMinutia}. Points in blocks with INVALID direction are ignored. In HIGH CURVATURE
+	 * blocks location and direction are refined by {@link #adjustHighCurvatureMinutiaV2}; otherwise the direction
+	 * comes from {@link #getLowCurvatureDirection}. Reliability is {@link ILfs#MEDIUM_RELIABILITY} in LOW RIDGE
+	 * FLOW blocks and {@link ILfs#HIGH_RELIABILITY} elsewhere. The minutia is then offered to
+	 * {@link #updateMinutiaeV2} with {@link ILfs#SCAN_VERTICAL}.
+	 *
+	 * @param oMinutiae          holder of the minutiae list; the minutia is added to it when new
+	 * @param cx                 x-pixel coordinate of the first of the two scan columns
+	 * @param cy                 y-pixel coordinate where the 3rd pattern pair of the minutia was detected
+	 * @param y2                 y-pixel coordinate where the 2nd pattern pair of the minutia was detected
+	 * @param featureId          type of minutia (index into the feature patterns table)
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oDirectionMap      pixelized Direction Map
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map
+	 * @param oHighCurveMap      pixelized High Curvature Map
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#IGNORE} if the minutia is to be
+	 *         ignored; a negative value on system error
+	 */
 	public int processVerticalScanMinutiaV2(AtomicReference<Minutiae> oMinutiae, final int cx, final int cy,
 			final int y2, final int featureId, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowFlowMap, AtomicIntegerArray oHighCurveMap,
@@ -2565,30 +2810,35 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: adjustHighCurvatureMinutia - Takes an initial minutia point detected
-	 * #cat: in a high-curvature area and adjusts its location and #cat: direction.
-	 * First, it walks and extracts the contour #cat: of the detected feature
-	 * looking for and processing any loop #cat: discovered along the way. Once the
-	 * contour is extracted, #cat: the point of highest-curvature is determined and
-	 * used to #cat: adjust the location of the minutia point. The angle of #cat:
-	 * the line perpendicular to the tangent on the high-curvature #cat: contour at
-	 * the minutia point is used as the mintutia's #cat: direction. Input: xLoc -
-	 * starting x-pixel coord of feature (interior to feature) yLoc - starting
-	 * y-pixel coord of feature (interior to feature) xEdge - x-pixel coord of
-	 * corresponding edge pixel (exterior to feature) yEdge - y-pixel coord of
-	 * corresponding edge pixel (exterior to feature) binarizedImageData - binary
-	 * image data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image lfsParams - parameters and
-	 * thresholds for controlling LFS Output: oIDir - direction of adjusted minutia
-	 * point oXLoc - adjusted x-pixel coord of feature oYLoc - adjusted y-pixel
-	 * coord of feature oXEdge - adjusted x-pixel coord of corresponding edge pixel
-	 * oYEdge - adjusted y-pixel coord of corresponding edge pixel oMinutiae -
-	 * points to a list of detected minutia structures Return Code: Zero - minutia
-	 * point processed successfully IGNORE - minutia point is to be ignored Negative
-	 * - system error
-	 **************************************************************************/
+	/**
+	 * Adjusts the location and direction of a minutia detected in a high-curvature area.
+	 *
+	 * <p>NIST origin: {@code adjust_high_curvature_minutia()} in {@code minutia.c}. The feature's contour of
+	 * {@code 2 * highCurveHalfContour + 1} points is traced. If the contour forms a loop, the loop is processed
+	 * (its minutiae extracted or the loop filled, see {@link Loop#processLoop}) and the triggering minutia is
+	 * ignored. Otherwise the point of highest curvature (minimum angle between contour walls,
+	 * {@link Contour#minContourTheta}) becomes the new location, provided the angle is below
+	 * {@code maxHighCurveTheta} and the interior midpoint has the feature's color. The direction is the line
+	 * from that point to the interior midpoint.
+	 *
+	 * @param oIDir              receives the direction of the adjusted minutia
+	 * @param oXLoc              receives the adjusted x-pixel coordinate of the feature
+	 * @param oYLoc              receives the adjusted y-pixel coordinate of the feature
+	 * @param oXEdge             receives the adjusted x-pixel coordinate of the corresponding edge pixel
+	 * @param oYEdge             receives the adjusted y-pixel coordinate of the corresponding edge pixel
+	 * @param xLoc               starting x-pixel coordinate of the feature (interior to the feature)
+	 * @param yLoc               starting y-pixel coordinate of the feature (interior to the feature)
+	 * @param xEdge              x-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param yEdge              y-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; loops may
+	 *                           be filled in place
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oMinutiae          holder of the minutiae list; minutiae found on a processed loop are added to it
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) if the minutia point was processed successfully; {@link ILfs#IGNORE}
+	 *         if the minutia point is to be ignored; a negative value on system error
+	 */
 	public int adjustHighCurvatureMinutia(AtomicInteger oIDir, AtomicInteger oXLoc, AtomicInteger oYLoc,
 			AtomicInteger oXEdge, AtomicInteger oYEdge, final int xLoc, final int yLoc, final int xEdge,
 			final int yEdge, int[] binarizedImageData, final int imageWidth, final int imageHeight,
@@ -2759,30 +3009,32 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: adjustHighCurvatureMinutiaV2 - Takes an initial minutia point #cat: in
-	 * a high-curvature area and adjusts its location and #cat: direction. First, it
-	 * walks and extracts the contour #cat: of the detected feature looking for and
-	 * processing any loop #cat: discovered along the way. Once the contour is
-	 * extracted, #cat: the point of highest-curvature is determined and used to
-	 * #cat: adjust the location of the minutia point. The angle of #cat: the line
-	 * perpendicular to the tangent on the high-curvature #cat: contour at the
-	 * minutia point is used as the mintutia's #cat: direction. Input: xLoc -
-	 * starting x-pixel coord of feature (interior to feature) yLoc - starting
-	 * y-pixel coord of feature (interior to feature) xEdge - x-pixel coord of
-	 * corresponding edge pixel (exterior to feature) yEdge - y-pixel coord of
-	 * corresponding edge pixel (exterior to feature) binarizedImageData - binary
-	 * image data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image oLowFlowMap - pixelized Low Ridge
-	 * Flow Map lfsParams - parameters and thresholds for controlling LFS Output:
-	 * oIDir - direction of adjusted minutia point oXLoc - adjusted x-pixel coord of
-	 * feature oYLoc - adjusted y-pixel coord of feature oXEdge - adjusted x-pixel
-	 * coord of corresponding edge pixel oYEdge - adjusted y-pixel coord of
-	 * corresponding edge pixel oMinutiae - points to a list of detected minutia
-	 * structures Return Code: Zero - minutia point processed successfully IGNORE -
-	 * minutia point is to be ignored Negative - system error
-	 **************************************************************************/
+	/**
+	 * Adjusts the location and direction of a minutia detected in a high-curvature area (version 2).
+	 *
+	 * <p>NIST origin: {@code adjust_high_curvature_minutia_V2()} in {@code minutia.c}. Same algorithm as
+	 * {@link #adjustHighCurvatureMinutia}, except that loops are processed with the Low Ridge Flow Map so that
+	 * minutiae extracted from loops receive an appropriate reliability.
+	 *
+	 * @param oIDir              receives the direction of the adjusted minutia
+	 * @param oXLoc              receives the adjusted x-pixel coordinate of the feature
+	 * @param oYLoc              receives the adjusted y-pixel coordinate of the feature
+	 * @param oXEdge             receives the adjusted x-pixel coordinate of the corresponding edge pixel
+	 * @param oYEdge             receives the adjusted y-pixel coordinate of the corresponding edge pixel
+	 * @param xLoc               starting x-pixel coordinate of the feature (interior to the feature)
+	 * @param yLoc               starting y-pixel coordinate of the feature (interior to the feature)
+	 * @param xEdge              x-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param yEdge              y-pixel coordinate of the corresponding edge pixel (exterior to the feature)
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; loops may
+	 *                           be filled in place
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map
+	 * @param oMinutiae          holder of the minutiae list; minutiae found on a processed loop are added to it
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) if the minutia point was processed successfully; {@link ILfs#IGNORE}
+	 *         if the minutia point is to be ignored; a negative value on system error
+	 */
 	public int adjustHighCurvatureMinutiaV2(AtomicInteger oIDir, AtomicInteger oXLoc, AtomicInteger oYLoc,
 			AtomicInteger oXEdge, AtomicInteger oYEdge, final int xLoc, final int yLoc, final int xEdge,
 			final int yEdge, int[] binarizedImageData, final int imageWidth, final int imageHeight,
@@ -2955,19 +3207,27 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getLowCurvatureDirection - Converts a bi-direcitonal IMAP direction
-	 * #cat: (based on a semi-circle) to a uni-directional value covering #cat: a
-	 * full circle based on the scan orientation used to detect #cat: a minutia
-	 * feature (horizontal or vertical) and whether the #cat: detected minutia is
-	 * appearing or disappearing.
-	 * 
-	 * Input: scanDir - designates the feature scan orientation appearing -
-	 * designates the minutia as appearing or disappearing nInputBlockImageMapValue
-	 * - IMAP block direction nDirs - number of IMAP directions (in semicircle)
-	 * Return Code: New direction - bi-directonal integer direction on full circle
-	 *************************************************************************/
+	/**
+	 * Converts a bi-directional block direction (semicircle) into a uni-directional minutia direction (full
+	 * circle).
+	 *
+	 * <p>NIST origin: {@code get_low_curvature_direction()} in {@code minutia.c}. The result depends on the scan
+	 * orientation used to detect the feature and on whether the minutia is appearing or disappearing. The same
+	 * logic holds for ridge-endings and bifurcations:
+	 * <ul>
+	 * <li>Quadrant I (direction {@code <= nDirs / 2}): {@code nDirs} is added (the minutia points opposite the
+	 * ridge flow) for a horizontal-scan appearing minutia or a vertical-scan disappearing minutia.</li>
+	 * <li>Quadrant II: {@code nDirs} is added for a disappearing minutia (horizontal or vertical scan).</li>
+	 * </ul>
+	 * Otherwise the block direction is returned unchanged.
+	 *
+	 * @param scanDir                  feature scan orientation ({@link ILfs#SCAN_HORIZONTAL} or
+	 *                                 {@link ILfs#SCAN_VERTICAL})
+	 * @param appearing                whether the minutia is appearing ({@link ILfs#APPEARING}) or disappearing
+	 * @param nInputBlockImageMapValue IMAP block direction on the semicircle
+	 * @param nDirs                    number of IMAP directions in a semicircle
+	 * @return the minutia direction on the full circle, in the range {@code [0, 2 * nDirs)}
+	 */
 	@SuppressWarnings("java:S125")
 	public int getLowCurvatureDirection(int scanDir, int appearing, int nInputBlockImageMapValue, int nDirs) {
 		int iDir;
@@ -3044,12 +3304,15 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		return (iDir);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: free_Minutiae - Takes a minutiae list and deallocates all memory #cat:
-	 * associated with it. Input: oMinutiae - pointer to allocated list of minutia
-	 * structures
-	 *************************************************************************/
+	/**
+	 * Releases a minutiae list and all minutiae it holds.
+	 *
+	 * <p>NIST origin: {@code free_minutiae()} in {@code minutia.c}. Each minutia is passed to
+	 * {@link #freeMinutia}, the list reference is cleared and the holder is set to {@code null}.
+	 *
+	 * @param oMinutiae holder of the minutiae list to release; may be {@code null}. On return its referenced
+	 *                  value is {@code null}.
+	 */
 	public void freeMinutiae(AtomicReference<Minutiae> oMinutiae) {
 		int i;
 
@@ -3066,11 +3329,14 @@ public class MinutiaHelper extends MindTct implements IMinutia {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: freeMinutia - Takes a minutia pointer and deallocates all memory #cat:
-	 * associated with it. Input: minutia - pointer to allocated minutia structure
-	 *************************************************************************/
+	/**
+	 * Releases a single minutia.
+	 *
+	 * <p>NIST origin: {@code free_minutia()} in {@code minutia.c}. A no-op in Java because memory is reclaimed
+	 * by the garbage collector; retained for parity with the C API.
+	 *
+	 * @param minutia the minutia to release
+	 */
 	@SuppressWarnings({ "java:S1186" })
 	public void freeMinutia(Minutia minutia) {
 	}

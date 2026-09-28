@@ -3,13 +3,33 @@ package org.mosip.nist.nfiq1.mindtct;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.IMorph;
 
+/**
+ * Binary morphology operations (erosion and dilation) used by MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code morph.c}. The routines operate on binary images
+ * stored one pixel per {@code int} (row-major, {@link ILfs#TRUE} = set pixel,
+ * {@link ILfs#FALSE} = clear pixel) using the 4-connected neighbourhood, and
+ * are used, for example, to clean up the low-quality/low-flow block maps.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class Morph extends MindTct implements IMorph {
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Morph instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Morph() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Morph} instance
+	 */
 	public static synchronized Morph getInstance() {
 		if (instance == null) {
 			instance = new Morph();
@@ -17,16 +37,22 @@ public class Morph extends MindTct implements IMorph {
 		return instance;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: erodeImage2 - Erodes an 8-bit image by setting true pixels to zero
-	 * #cat: if any of their 4 neighbors is zero. Allocation of the #cat: output
-	 * image is the responsibility of the caller. The #cat: input image remains
-	 * unchanged. This routine will NOT #cat: erode pixels indiscriminately along
-	 * the image border. Input: inputImageData - input 8-bit image to be eroded
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image Output: outputImageData - contains to the resulting eroded image
-	 **************************************************************************/
+	/**
+	 * Erodes an 8-bit binary image by setting true pixels to zero if any of their
+	 * 4 neighbours is zero.
+	 * <p>
+	 * NIST: {@code erode_charimage_2()}. Allocation of the output image is the
+	 * responsibility of the caller. The input image remains unchanged; it is
+	 * first copied into the output and then eroded pixels are cleared. This
+	 * routine will NOT erode pixels indiscriminately along the image border:
+	 * neighbours outside the image are treated as true.
+	 *
+	 * @param inputImageData  input 8-bit binary image to be eroded
+	 * @param outputImageData output: receives the resulting eroded image (must be
+	 *                        at least as long as {@code inputImageData})
+	 * @param imageWidth      width (in pixels) of image
+	 * @param imageHeight     height (in pixels) of image
+	 */
 	public void erodeImage2(int[] inputImageData, int[] outputImageData, final int imageWidth, final int imageHeight) {
 		int row;
 		int col;
@@ -57,15 +83,21 @@ public class Morph extends MindTct implements IMorph {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dilateImage2 - Dilates an 8-bit image by setting false pixels to #cat:
-	 * one if any of their 4 neighbors is non-zero. Allocation #cat: of the output
-	 * image is the responsibility of the caller. #cat: The input image remains
-	 * unchanged. Input: inputImageData - input 8-bit image to be dilated imageWidth
-	 * - width (in pixels) of image imageHeight - height (in pixels) of image
-	 * Output: outputImageData - contains to the resulting dilated image
-	 **************************************************************************/
+	/**
+	 * Dilates an 8-bit binary image by setting false pixels to one if any of
+	 * their 4 neighbours is non-zero.
+	 * <p>
+	 * NIST: {@code dilate_charimage_2()}. Allocation of the output image is the
+	 * responsibility of the caller. The input image remains unchanged; it is
+	 * first copied into the output and then dilated pixels are set. Neighbours
+	 * outside the image are treated as false.
+	 *
+	 * @param inputImageData  input 8-bit binary image to be dilated
+	 * @param outputImageData output: receives the resulting dilated image (must
+	 *                        be at least as long as {@code inputImageData})
+	 * @param imageWidth      width (in pixels) of image
+	 * @param imageHeight     height (in pixels) of image
+	 */
 	public void dilateImage2(int[] inputImageData, int[] outputImageData, final int imageWidth, final int imageHeight) {
 		int row;
 		int col;
@@ -99,16 +131,21 @@ public class Morph extends MindTct implements IMorph {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getSouth8_2 - Returns the value of the 8-bit image pixel 1 below the
-	 * #cat: current pixel if defined else it returns (char)0. Input: inputImageData
-	 * - points to current pixel in image inputImageDataIndex- current pixel index
-	 * row - y-coord of current pixel imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image failCode - return value if desired
-	 * pixel does not exist Return Code: Zero - if neighboring pixel is undefined
-	 * (outside of image boundaries) Pixel - otherwise, value of neighboring pixel
-	 **************************************************************************/
+	/**
+	 * Returns the value of the 8-bit image pixel one row below the current pixel
+	 * if defined, else returns {@code failCode}.
+	 * <p>
+	 * NIST: {@code get_south8_2()}.
+	 *
+	 * @param inputImageData      image pixel data (row-major)
+	 * @param inputImageDataIndex index of the current pixel in the image
+	 * @param row                 y-coord of current pixel
+	 * @param imageWidth          width (in pixels) of image
+	 * @param imageHeight         height (in pixels) of image
+	 * @param failCode            return value if the desired pixel does not exist
+	 * @return {@code failCode} if the neighbouring pixel is undefined (outside of
+	 *         image boundaries); otherwise the value of the neighbouring pixel
+	 */
 	public int getSouth82(int[] inputImageData, int inputImageDataIndex, int row, int imageWidth, int imageHeight,
 			int failCode) {
 		if (row >= (imageHeight - 1)) // catch case where image is undefined southwards
@@ -118,16 +155,20 @@ public class Morph extends MindTct implements IMorph {
 		return (inputImageData[inputImageDataIndex + imageWidth]);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getNorth8_2 - Returns the value of the 8-bit image pixel 1 above the
-	 * #cat: current pixel if defined else it returns (char)0. Input: inputImageData
-	 * - points to current pixel in image inputImageDataIndex- current pixel index
-	 * row - y-coord of current pixel imageWidth - width (in pixels) of image
-	 * failCode - return value if desired pixel does not exist Return Code: Zero -
-	 * if neighboring pixel is undefined (outside of image boundaries) Pixel -
-	 * otherwise, value of neighboring pixel
-	 **************************************************************************/
+	/**
+	 * Returns the value of the 8-bit image pixel one row above the current pixel
+	 * if defined, else returns {@code failCode}.
+	 * <p>
+	 * NIST: {@code get_north8_2()}.
+	 *
+	 * @param inputImageData      image pixel data (row-major)
+	 * @param inputImageDataIndex index of the current pixel in the image
+	 * @param row                 y-coord of current pixel
+	 * @param imageWidth          width (in pixels) of image
+	 * @param failCode            return value if the desired pixel does not exist
+	 * @return {@code failCode} if the neighbouring pixel is undefined (outside of
+	 *         image boundaries); otherwise the value of the neighbouring pixel
+	 */
 	public int getNorth82(int[] inputImageData, int inputImageDataIndex, int row, int imageWidth, int failCode) {
 		if (row < 1) /* catch case where image is undefined northwards */
 			return failCode; /* use plane geometry and return code. */
@@ -135,16 +176,20 @@ public class Morph extends MindTct implements IMorph {
 		return inputImageData[inputImageDataIndex - imageWidth];
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getEast8_2 - Returns the value of the 8-bit image pixel 1 right of the
-	 * #cat: current pixel if defined else it returns (char)0. Input: inputImageData
-	 * - points to current pixel in image inputImageDataIndex- current pixel index
-	 * col - x-coord of current pixel imageWidth - width (in pixels) of image
-	 * failCode - return value if desired pixel does not exist Return Code: Zero -
-	 * if neighboring pixel is undefined (outside of image boundaries) Pixel -
-	 * otherwise, value of neighboring pixel
-	 **************************************************************************/
+	/**
+	 * Returns the value of the 8-bit image pixel one column right of the current
+	 * pixel if defined, else returns {@code failCode}.
+	 * <p>
+	 * NIST: {@code get_east8_2()}.
+	 *
+	 * @param inputImageData      image pixel data (row-major)
+	 * @param inputImageDataIndex index of the current pixel in the image
+	 * @param col                 x-coord of current pixel
+	 * @param imageWidth          width (in pixels) of image
+	 * @param failCode            return value if the desired pixel does not exist
+	 * @return {@code failCode} if the neighbouring pixel is undefined (outside of
+	 *         image boundaries); otherwise the value of the neighbouring pixel
+	 */
 	public int getEast82(int[] inputImageData, int inputImageDataIndex, int col, int imageWidth, int failCode) {
 		if (col >= (imageWidth - 1)) // catch case where image is undefined eastwards
 		{
@@ -154,15 +199,19 @@ public class Morph extends MindTct implements IMorph {
 		return (inputImageData[inputImageDataIndex + 1]);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getWest8_2 - Returns the value of the 8-bit image pixel 1 left of the
-	 * #cat: current pixel if defined else it returns (char)0. Input: inputImageData
-	 * - points to current pixel in image inputImageDataIndex- current pixel index
-	 * col - x-coord of current pixel failCode - return value if desired pixel does
-	 * not exist Return Code: Zero - if neighboring pixel is undefined (outside of
-	 * image boundaries) Pixel - otherwise, value of neighboring pixel
-	 **************************************************************************/
+	/**
+	 * Returns the value of the 8-bit image pixel one column left of the current
+	 * pixel if defined, else returns {@code failCode}.
+	 * <p>
+	 * NIST: {@code get_west8_2()}.
+	 *
+	 * @param inputImageData      image pixel data (row-major)
+	 * @param inputImageDataIndex index of the current pixel in the image
+	 * @param col                 x-coord of current pixel
+	 * @param failCode            return value if the desired pixel does not exist
+	 * @return {@code failCode} if the neighbouring pixel is undefined (outside of
+	 *         image boundaries); otherwise the value of the neighbouring pixel
+	 */
 	public int getWest82(int[] inputImageData, int inputImageDataIndex, int col, int failCode) {
 		if (col < 1) // catch case where image is undefined westwards
 		{

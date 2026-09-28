@@ -17,14 +17,45 @@ import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Java port of NIST MINDTCT {@code remove.c}: detection and removal of false minutiae.
+ *
+ * <p>After {@link MinutiaHelper} has detected candidate minutiae in the binarized fingerprint image, this
+ * class prunes the candidates that are artifacts of noise, scars, pores or binarization, before NFIQ 1.0
+ * computes its quality features. The main entry point, {@link #removeFalseMinutiaV2}, applies the following
+ * tests in order: islands and lakes, holes, minutiae pointing to an INVALID block, minutiae near INVALID
+ * blocks, side minutiae (removed or adjusted), hooks, overlaps, malformations and pores. Several tests also
+ * edit the binary image (e.g. filling detected islands/lakes).
+ *
+ * <p>The class is a lazily created singleton obtained through {@link #getInstance()}. It keeps no mutable
+ * per-call state, so the shared instance may be used from several threads provided the minutiae lists,
+ * images and maps passed in are not shared between concurrent calls.
+ */
 public class RemoveMinutia extends MindTct implements IRemoveMinutia {
+	/**
+	 * SLF4J logger used to report errors and, when detailed logging is enabled, which minutiae are removed or
+	 * adjusted.
+	 */
 	private static final Logger logger = LoggerFactory.getLogger(RemoveMinutia.class);
+	/**
+	 * Lazily created singleton instance; initialized by {@link #getInstance()}.
+	 */
 	private static RemoveMinutia instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()} instead.
+	 */
 	private RemoveMinutia() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@link RemoveMinutia} singleton, creating it on first use.
+	 *
+	 * <p>The method is {@code synchronized}, so lazy creation is thread-safe.
+	 *
+	 * @return the process-wide {@link RemoveMinutia} instance
+	 */
 	public static synchronized RemoveMinutia getInstance() {
 		if (instance == null) {
 			synchronized (RemoveMinutia.class) {
@@ -36,53 +67,108 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return instance;
 	}
 
+	/**
+	 * Returns the {@link Defs} singleton providing numeric helpers (rounding, precision truncation).
+	 *
+	 * @return the shared {@link Defs} instance
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Contour} singleton used to trace feature contours.
+	 *
+	 * @return the shared {@link Contour} instance
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the {@link MinutiaHelper} singleton used to sort, remove and join minutiae.
+	 *
+	 * @return the shared {@link MinutiaHelper} instance
+	 */
 	public MinutiaHelper getMinutiaHelper() {
 		return MinutiaHelper.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Maps} singleton that manages the block Direction, Low Flow and High Curvature maps.
+	 *
+	 * @return the shared {@link Maps} instance
+	 */
 	public Maps getMap() {
 		return Maps.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Free} singleton, the Java stand-in for the C memory deallocation helpers.
+	 *
+	 * @return the shared {@link Free} instance
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the {@link ImageUtil} singleton providing image searches such as free-path and directional search.
+	 *
+	 * @return the shared {@link ImageUtil} instance
+	 */
 	public ImageUtil getImageUtil() {
 		return ImageUtil.getInstance();
 	}
 
+	/**
+	 * Returns the {@link LfsUtil} singleton providing LFS geometry utilities (distances, direction differences,
+	 * line directions, min/max analysis).
+	 *
+	 * @return the shared {@link LfsUtil} instance
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
+	/**
+	 * Returns the {@link Loop} singleton used to detect loops, hooks and islands/lakes and to fill loops.
+	 *
+	 * @return the shared {@link Loop} instance
+	 */
 	public Loop getLoop() {
 		return Loop.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeFalseMinutiaV2 - Takes a list of true and false minutiae and
-	 * #cat: attempts to detect and remove the false minutiae based #cat: on a
-	 * series of tests. Input: oMinutiae - list of true and false minutiae
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image map -
-	 * contains below info directionMap - map of image blocks containing directional
-	 * ridge flow lowFlowMap - map of image blocks flagged as LOW RIDGE FLOW
-	 * highCurveMap - map of image blocks flagged as HIGH CURVATURE mappedImageWidth
-	 * - width in blocks of the maps mappedImageHeight - height in blocks of the
-	 * maps lfsParams - parameters and thresholds for controlling LFS Output:
-	 * minutiae - list of pruned minutiae Return Code: Zero - successful completion
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes false minutiae from a list of true and false minutiae by applying a series of tests.
+	 *
+	 * <p>NIST origin: {@code remove_false_minutia_V2()} in {@code remove.c}. Steps, in order:
+	 * <ol>
+	 * <li>sort minutiae top-to-bottom, then left-to-right;</li>
+	 * <li>remove minutiae on islands and lakes ({@link #removeIslandsAndLakes});</li>
+	 * <li>remove minutiae on holes ({@link #removeHoles});</li>
+	 * <li>remove minutiae pointing to an INVALID block ({@link #removePointingInvblockV2});</li>
+	 * <li>remove minutiae near INVALID blocks ({@link #removeNearInvblocksV2});</li>
+	 * <li>remove or adjust side minutiae ({@link #removeOrAdjustSideMinutiaeV2});</li>
+	 * <li>remove minutiae on hooks ({@link #removeHooks});</li>
+	 * <li>remove minutiae on opposite sides of an overlap ({@link #removeOverlaps});</li>
+	 * <li>remove malformed minutiae ({@link #removeMalformations});</li>
+	 * <li>remove minutiae on pores ({@link #removePoresV2}).</li>
+	 * </ol>
+	 * Processing stops at the first step returning a non-zero code.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; may be
+	 *                           edited (e.g. islands/lakes filled)
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param map                maps object holding the block Direction Map, Low Flow Map and High Curvature Map
+	 * @param mappedImageWidth   width of the maps, in blocks
+	 * @param mappedImageHeight  height of the maps, in blocks
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removeFalseMinutiaV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, Maps map, final int mappedImageWidth, final int mappedImageHeight,
 			final LfsParams lfsParams) {
@@ -155,15 +241,20 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeHoles - Removes minutia points on small loops around valleys.
-	 * Input: oMinutiae - list of true and false minutiae binarizedImageData -
-	 * binary image data (0==while & 1==black) imageWidth - width (in pixels) of
-	 * image imageHeight - height (in pixels) of image lfsParams - parameters and
-	 * thresholds for controlling LFS Output: oMinutiae - list of pruned minutiae
-	 * Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes minutia points lying on small loops (holes) around valleys.
+	 *
+	 * <p>NIST origin: {@code remove_holes()} in {@code remove.c}. For each bifurcation, the feature contour is
+	 * checked for forming a loop of at most {@code smallLoopLen} pixels ({@link Loop#onLoop}); if so the minutia
+	 * is removed.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removeHoles(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, LfsParams lfsParams) {
 		int minutiaIndex;
@@ -171,7 +262,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		Minutia minutia;
 
 		if (isShowLogs())
-			logger.info("REMOVING HOLES:");
+			logger.debug("REMOVING HOLES:");
 
 		minutiaIndex = 0;
 		/* Foreach minutia remaining in list ... */
@@ -186,7 +277,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 				/* If minutia is on a loop ... or loop test IGNORED */
 				if ((ret == ILfs.LOOP_FOUND) || (ret == ILfs.IGNORE)) {
 					if (isShowLogs())
-						logger.info("{},{} RM", minutia.getX(), minutia.getY());
+						logger.debug("{},{} RM", minutia.getX(), minutia.getY());
 
 					/* Then remove the minutia from list. */
 					if ((ret = getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae)) != ILfs.FALSE) {
@@ -218,17 +309,23 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeHooks - Takes a list of true and false minutiae and #cat:
-	 * attempts to detect and remove those false minutiae that #cat: are on a hook
-	 * (white or black). Input: oMinutiae - list of true and false minutiae
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * list of pruned minutiae Return Code: Zero - successful completion Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes false minutiae lying on a hook (white or black).
+	 *
+	 * <p>NIST origin: {@code remove_hooks()} in {@code remove.c}. The list is assumed sorted top-to-bottom. Pairs
+	 * of minutiae of different type that are within {@code maxRmTestDist} pixels of each other and whose
+	 * directions are nearly opposite (difference greater than {@code 3 * (numDirections / 4) - 1} direction units,
+	 * about 124 degrees for 16 directions) are tested with {@link Loop#onHook}
+	 * over at most {@code maxHookLen} contour steps; both minutiae of a detected hook are flagged and then removed.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_641} (negative) on an
+	 *         invalid direction difference; another negative value on system error
+	 */
 	public int removeHooks(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, final LfsParams lfsParams) {
 		List<Boolean> toRemoveIndexes;
@@ -245,7 +342,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		double dDistance;
 
 		if (isShowLogs())
-			logger.info("REMOVING HOOKS:");
+			logger.debug("REMOVING HOOKS:");
 
 		/* Allocate list of minutia indices that upon completion of testing */
 		/* should be removed from the minutiae lists. Note: That using */
@@ -267,14 +364,14 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		minDeltaDir = (3 * qtrNDirs) - 1;
 
 		if (isShowLogs())
-			logger.info("num={}, full_ndirs={}, qtr_ndirs={}", oMinutiae.get().getNum(), fullNDirs, qtrNDirs);
+			logger.debug("num={}, full_ndirs={}, qtr_ndirs={}", oMinutiae.get().getNum(), fullNDirs, qtrNDirs);
 		minutiaFIndex = 0;
 		/* Foreach primary (first) minutia (except for last one in list) ... */
 		while (minutiaFIndex < oMinutiae.get().getNum() - 1) {
 			/* If current first minutia not previously set to be removed. */
 			if (!toRemoveIndexes.get(minutiaFIndex)) {
 				if (isShowLogs())
-					logger.info("");
+					logger.debug("");
 
 				/* Set first minutia to temporary pointer. */
 				minutia1 = oMinutiae.get().getList().get(minutiaFIndex);
@@ -285,7 +382,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					minutia2 = oMinutiae.get().getList().get(minutiaSIndex);
 
 					if (isShowLogs())
-						logger.info("1:{}({},{}){} 2:{}({},{}){} ", minutiaFIndex, minutia1.getX(), minutia1.getY(),
+						logger.debug("1:{}({},{}){} 2:{}({},{}){} ", minutiaFIndex, minutia1.getX(), minutia1.getY(),
 								minutia1.getType(), minutiaSIndex, minutia2.getX(), minutia2.getY(),
 								minutia2.getType());
 
@@ -297,7 +394,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					/* If the first minutia's pixel has been previously changed... */
 					if (binarizedImageData[(minutia1.getY() * imageWidth) + minutia1.getX()] != minutia1.getType()) {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 						/* Then break out of secondary loop and skip to next first. */
 						break;
 					}
@@ -315,7 +412,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* If delta y small enough (ex. < 8 pixels) ... */
 						if (deltaY <= lfsParams.getMaxRmTestDist()) {
 							if (isShowLogs())
-								logger.info("1DY ");
+								logger.debug("1DY ");
 
 							/* Compute Euclidean distance between 1st & 2nd mintuae. */
 							dDistance = getLfsUtil().distance(minutia1.getX(), minutia1.getY(), minutia2.getX(),
@@ -323,14 +420,14 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							/* If distance is NOT too large (ex. < 8 pixels) ... */
 							if (dDistance <= lfsParams.getMaxRmTestDist()) {
 								if (isShowLogs())
-									logger.info("2DS ");
+									logger.debug("2DS ");
 
 								/* Compute "inner" difference between directions on */
 								/* a full circle and test. */
 								if ((deltaDir = getLfsUtil().closestDirDistance(minutia1.getDirection(),
 										minutia2.getDirection(), fullNDirs)) == ILfs.INVALID_DIR) {
 									getFree().free(toRemoveIndexes);
-									logger.info("ERROR : removeHooks : INVALID direction");
+									logger.error("ERROR : removeHooks : INVALID direction");
 									return (ILfs.ERROR_CODE_641);
 								}
 								/* If the difference between dirs is large enough ... */
@@ -338,7 +435,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								/* more likely they should be joined) */
 								if (deltaDir > minDeltaDir) {
 									if (isShowLogs())
-										logger.info("3DD ");
+										logger.debug("3DD ");
 
 									/* If 1st & 2nd minutiae are NOT same type ... */
 									if (minutia1.getType() != minutia2.getType()) {
@@ -350,7 +447,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If hook detected between pair ... */
 										if (ret == ILfs.HOOK_FOUND) {
 											if (isShowLogs())
-												logger.info("4HK RM");
+												logger.debug("4HK RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes.set(minutiaFIndex, true);
@@ -360,7 +457,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If hook test IGNORED ... */
 										else if (ret == ILfs.IGNORE) {
 											if (isShowLogs())
-												logger.info("RM");
+												logger.debug("RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes.set(minutiaFIndex, true);
@@ -377,29 +474,29 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* second minutia. */
 										else {
 											if (isShowLogs())
-												logger.info("");
+												logger.debug("");
 										}
 									} else {
 										if (isShowLogs())
-											logger.info("");
+											logger.debug("");
 									}
 									/* End different type test. */
 								} // End deltadir test.
 								else {
 									if (isShowLogs())
-										logger.info("");
+										logger.debug("");
 								}
 							} // End distance test.
 							else {
 								if (isShowLogs())
-									logger.info("");
+									logger.debug("");
 							}
 						}
 						/* Otherwise, current 2nd too far below 1st, so skip to next */
 						/* 1st minutia. */
 						else {
 							if (isShowLogs())
-								logger.info("");
+								logger.debug("");
 
 							/* Break out of inner secondary loop. */
 							break;
@@ -407,7 +504,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					} // End if !to_remove[s]
 					else {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 					}
 
 					/* Bump to next second minutia in minutiae list. */
@@ -440,20 +537,24 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeHooksIslandsLakesOverlaps - Removes minutia points on hooks,
-	 * #cat: islands, lakes, and overlaps and fills in small small #cat: loops in
-	 * the binary image and joins minutia features in #cat: the image on opposite
-	 * sides of an overlap. So, this #cat: routine not only prunes minutia points
-	 * but it edits the #cat: binary input image as well. Input: oMinutiae - list of
-	 * true and false minutiae binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image lfsParams - parameters and thresholds for controlling LFS
-	 * Output: oMinutiae - list of pruned minutiae binarizedImageData - edited
-	 * binary image with loops filled and overlaps removed Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes minutia points on hooks, islands, lakes and overlaps in a single pass, editing the binary image.
+	 *
+	 * <p>NIST origin: {@code remove_hooks_islands_lakes_overlaps()} in {@code remove.c} (version 1 pipeline; not
+	 * called by {@link #removeFalseMinutiaV2}). For nearby pairs of minutiae with nearly opposite directions:
+	 * pairs of different type on a hook are removed; pairs of the same type on an island or lake are removed and
+	 * the small loop is filled in the image; pairs on opposite sides of an overlap connected by a free path are
+	 * removed and their features joined in the image ({@link MinutiaHelper#joinMinutia}).
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; edited in
+	 *                           place with loops filled and overlaps removed
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_301} (negative) on an
+	 *         invalid direction difference; another negative value on system error
+	 */
 	public int removeHooksIslandsLakesOverlaps(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, final LfsParams lfsParams) {
 		List<Boolean> toRemoveIndexes;
@@ -472,12 +573,13 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		double dDistance;
 
 		if (isShowLogs())
-			logger.info("REMOVING HOOKS, ISLANDS, LAKES, AND OVERLAPS:");
+			logger.debug("REMOVING HOOKS, ISLANDS, LAKES, AND OVERLAPS:");
 
 		/* Allocate list of minutia indices that upon completion of testing */
 		/* should be removed from the minutiae lists. Note: That using */
 		/* initializes the list to FALSE. */
 		toRemoveIndexes = new ArrayList<Boolean>(Arrays.asList(new Boolean[oMinutiae.get().getNum()]));
+		Collections.fill(toRemoveIndexes, Boolean.FALSE);
 		/* Compute number directions in full circle. */
 		fullNDirs = lfsParams.getNumDirections() << 1;
 		/* Compute number of directions in 45=(180/4) degrees. */
@@ -497,7 +599,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 			/* If current first minutia not previously set to be removed. */
 			if (!toRemoveIndexes.get(firstMinutiaIndex)) {
 				if (isShowLogs())
-					logger.info("");
+					logger.debug("");
 
 				/* Set first minutia to temporary pointer. */
 				firstMinutia = oMinutiae.get().getList().get(firstMinutiaIndex);
@@ -508,7 +610,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					secondMinutia = oMinutiae.get().getList().get(secondMinutiaIndex);
 
 					if (isShowLogs())
-						logger.info("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, firstMinutia.getX(),
+						logger.debug("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, firstMinutia.getX(),
 								firstMinutia.getY(), firstMinutia.getType(), secondMinutiaIndex, secondMinutia.getX(),
 								secondMinutia.getY(), secondMinutia.getType());
 
@@ -521,7 +623,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					if (binarizedImageData[(firstMinutia.getY() * imageWidth) + firstMinutia.getX()] != firstMinutia
 							.getType()) {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 						/* Then break out of secondary loop and skip to next first. */
 						break;
 					}
@@ -540,7 +642,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* If delta y small enough (ex. < 8 pixels) ... */
 						if (deltaY <= lfsParams.getMaxRmTestDist()) {
 							if (isShowLogs())
-								logger.info("1DY ");
+								logger.debug("1DY ");
 
 							/* Compute Euclidean distance between 1st & 2nd mintuae. */
 							dDistance = this.getLfsUtil().distance(firstMinutia.getX(), firstMinutia.getY(),
@@ -548,7 +650,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							/* If distance is NOT too large (ex. < 8 pixels) ... */
 							if (dDistance <= lfsParams.getMaxRmTestDist()) {
 								if (isShowLogs())
-									logger.info("2DS ");
+									logger.debug("2DS ");
 
 								/* Compute "inner" difference between directions on */
 								/* a full circle and test. */
@@ -563,7 +665,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								/* more likely they should be joined) */
 								if (deltaDir > minDeltaDir) {
 									if (isShowLogs())
-										logger.info("3DD ");
+										logger.debug("3DD ");
 
 									/* If 1st & 2nd minutiae are NOT same type ... */
 									if (firstMinutia.getType() != secondMinutia.getType()) {
@@ -574,7 +676,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If hook detected between pair ... */
 										if (ret == ILfs.HOOK_FOUND) {
 											if (isShowLogs())
-												logger.info("4HK RM");
+												logger.debug("4HK RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes.set(firstMinutiaIndex, true);
@@ -584,7 +686,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If hook test IGNORED ... */
 										else if (ret == ILfs.IGNORE) {
 											if (isShowLogs())
-												logger.info("RM");
+												logger.debug("RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes.set(firstMinutiaIndex, true);
@@ -601,7 +703,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* second minutia. */
 										else {
 											if (isShowLogs())
-												logger.info("");
+												logger.debug("");
 										}
 									}
 									/* Otherwise, pair is the same type, so test to see */
@@ -617,7 +719,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If pair is on island/lake ... */
 										if (ret == ILfs.LOOP_FOUND) {
 											if (isShowLogs())
-												logger.info("4IL RM");
+												logger.debug("4IL RM");
 
 											/* Fill the loop. */
 											if ((ret = getLoop().fillLoop(contour.getContourX(), contour.getContourY(),
@@ -637,7 +739,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If island/lake test IGNORED ... */
 										else if (ret == ILfs.IGNORE) {
 											if (isShowLogs())
-												logger.info("RM");
+												logger.debug("RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes.set(firstMinutiaIndex, true);
@@ -658,7 +760,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 													secondMinutia.getX(), secondMinutia.getY(), binarizedImageData,
 													imageWidth, imageHeight, lfsParams) != ILfs.FALSE) {
 												if (isShowLogs())
-													logger.info("4OV RM");
+													logger.debug("4OV RM");
 
 												/* Then assume overlap, so ... */
 												/* Join first and second minutiae in image. */
@@ -677,26 +779,26 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 											/* to next second minutia. */
 											else {
 												if (isShowLogs())
-													logger.info("");
+													logger.debug("");
 											}
 										} // End overlap test.
 									} // End same type tests (island/lake & overlap).
 								} // End deltadir test.
 								else {
 									if (isShowLogs())
-										logger.info("");
+										logger.debug("");
 								}
 							} // End distance test.
 							else {
 								if (isShowLogs())
-									logger.info("");
+									logger.debug("");
 							}
 						}
 						/* Otherwise, current 2nd too far below 1st, so skip to next */
 						/* 1st minutia. */
 						else {
 							if (isShowLogs())
-								logger.info("");
+								logger.debug("");
 
 							/* Break out of inner secondary loop. */
 							break;
@@ -704,7 +806,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					} // End if !to_remove[s]
 					else {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 					}
 					/* Bump to next second minutia in minutiae list. */
 					secondMinutiaIndex++;
@@ -736,19 +838,23 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeIslandsAndLakes - Takes a list of true and false minutiae and
-	 * #cat: attempts to detect and remove those false minutiae that #cat: are
-	 * either on a common island (filled with black pixels) #cat: or a lake (filled
-	 * with white pixels). #cat: Note that this routine edits the binary image by
-	 * filling #cat: detected lakes or islands. Input: oMinutiae - list of true and
-	 * false minutiae binarizedImageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image lfsParams - parameters and thresholds for controlling LFS Output:
-	 * oMinutiae - list of pruned minutiae Return Code: Zero - successful completion
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes false minutiae lying on a common island (black) or lake (white).
+	 *
+	 * <p>NIST origin: {@code remove_islands_and_lakes()} in {@code remove.c}. The list is assumed sorted
+	 * top-to-bottom. Pairs of minutiae of the same type within {@code maxRmTestDist} pixels whose directions are
+	 * nearly opposite are tested with {@link Loop#onIslandLake} (loop half-length {@code maxHalfLoop}); when both
+	 * lie on the same small loop, the loop is filled in the binary image and both minutiae are removed.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major; detected
+	 *                           islands/lakes are filled in place
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_611} (negative) on an
+	 *         invalid direction difference; another negative value on system error
+	 */
 	public int removeIslandsAndLakes(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, int imageWidth,
 			int imageHeight, LfsParams lfsParams) {
 		int[] toRemoveIndexes;
@@ -770,7 +876,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		int halfLoop;
 
 		if (isShowLogs())
-			logger.info("REMOVING ISLANDS AND LAKES:");
+			logger.debug("REMOVING ISLANDS AND LAKES:");
 
 		distThresh = lfsParams.getMaxRmTestDist();
 		halfLoop = lfsParams.getMaxHalfLoop();
@@ -795,7 +901,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		while (firstMinutiaIndex < oMinutiae.get().getNum() - 1) {
 
 			if (isShowLogs())
-				logger.info("(f = {}, s = {})", firstMinutiaIndex, secondMinutiaIndex);
+				logger.debug("(f = {}, s = {})", firstMinutiaIndex, secondMinutiaIndex);
 
 			/* If current first minutia not previously set to be removed. */
 			if (toRemoveIndexes[firstMinutiaIndex] != ILfs.TRUE) {
@@ -811,7 +917,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					/* If the secondary minutia is desired type ... */
 					if (oSecondMinutia.get().getType() == oFirstMinutia.get().getType()) {
 						if (isShowLogs())
-							logger.info("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, oFirstMinutia.get().getX(),
+							logger.debug("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, oFirstMinutia.get().getX(),
 									oFirstMinutia.get().getY(), oFirstMinutia.get().getType(), secondMinutiaIndex,
 									oSecondMinutia.get().getX(), oSecondMinutia.get().getY(),
 									oSecondMinutia.get().getType());
@@ -826,7 +932,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						if (binarizedImageData[(oFirstMinutia.get().getY() * imageWidth)
 								+ oFirstMinutia.get().getX()] != oFirstMinutia.get().getType()) {
 							if (isShowLogs())
-								logger.info("");
+								logger.debug("");
 							/* Then break out of secondary loop and skip to next */
 							/* first. */
 							break;
@@ -847,7 +953,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							/* If delta y small enough (ex. <16 pixels)... */
 							if (deltaY <= distThresh) {
 								if (isShowLogs())
-									logger.info("1DY ");
+									logger.debug("1DY ");
 
 								/* Compute Euclidean distance between 1st & 2nd */
 								/* mintuae. */
@@ -857,7 +963,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								/* If distance is NOT too large (ex. <16 pixels)... */
 								if (dist <= distThresh) {
 									if (isShowLogs())
-										logger.info("2DS ");
+										logger.debug("2DS ");
 
 									/* Compute "inner" difference between directions */
 									/* on a full circle and test. */
@@ -874,7 +980,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 									/* other the more likely they should be joined) */
 									if (deltaDir > minDeltaDir) {
 										if (isShowLogs())
-											logger.info("3DD ");
+											logger.debug("3DD ");
 
 										/* Pair is the same type, so test to see */
 										/* if both are on an island or lake. */
@@ -888,7 +994,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If pair is on island/lake ... */
 										if (ret.get() == ILfs.LOOP_FOUND) {
 											if (isShowLogs())
-												logger.info("4IL RM");
+												logger.debug("4IL RM");
 
 											/* Fill the loop. */
 											ret.set(getLoop().fillLoop(contour.getContourX(), contour.getContourY(),
@@ -909,7 +1015,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* If island/lake test IGNORED ... */
 										else if (ret.get() == ILfs.IGNORE) {
 											if (isShowLogs())
-												logger.info("RM");
+												logger.debug("RM");
 
 											/* Set to remove first minutia. */
 											toRemoveIndexes[firstMinutiaIndex] = ILfs.TRUE;
@@ -923,31 +1029,31 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 											return (ret.get());
 										} else {
 											if (isShowLogs())
-												logger.info("");
+												logger.debug("");
 										}
 									} // End deltadir test.
 									else {
 										if (isShowLogs())
-											logger.info("");
+											logger.debug("");
 									}
 								} // End distance test.
 								else {
 									if (isShowLogs())
-										logger.info("");
+										logger.debug("");
 								}
 							}
 							/* Otherwise, current 2nd too far below 1st, so skip to */
 							/* next 1st minutia. */
 							else {
 								if (isShowLogs())
-									logger.info("");
+									logger.debug("");
 								/* Break out of inner secondary loop. */
 								break;
 							} // End delta-y test.
 						} // End if !to_remove[s]
 						else {
 							if (isShowLogs())
-								logger.info("");
+								logger.debug("");
 						}
 					} // End if 2nd not desired type
 
@@ -981,28 +1087,27 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeMalformations - Attempts to detect and remove minutia points
-	 * #cat: that are "irregularly" shaped. Irregularity is measured #cat: by
-	 * measuring across the interior of the feature at #cat: two progressive points
-	 * down the feature's contour. The #cat: test is triggered if a pixel of
-	 * opposite color from the #cat: feture's type is found. The ratio of the
-	 * distances across #cat: the feature at the two points is computed and if the
-	 * ratio #cat: is too large then the minutia is determined to be malformed.
-	 * #cat: A cursory test is conducted prior to the general tests in #cat: the
-	 * event that the minutia lies in a block with LOW RIDGE #cat: FLOW. In this
-	 * case, the distance across the feature at #cat: the second progressive contour
-	 * point is measured and if #cat: too large, the point is determined to be
-	 * malformed. Input: oMinutiae - list of true and false minutiae
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * oLowFlowMap - map of image blocks flagged as LOW RIDGE FLOW mappedImageWidth
-	 * - width in blocks of the map mappedImageHeight - height in blocks of the map
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * list of pruned minutiae Return Code: Zero - successful completion Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes "irregularly" shaped (malformed) minutia points.
+	 *
+	 * <p>NIST origin: {@code remove_malformations()} in {@code remove.c}. For each minutia, the contour is traced
+	 * {@code malformationSteps2} steps in both directions; incomplete contours or loops cause removal.
+	 * Irregularity is measured across the feature interior at two progressive contour points
+	 * ({@code malformationSteps1} and {@code malformationSteps2}). In a LOW RIDGE FLOW block the minutia is
+	 * removed if the distance at the second point exceeds {@code maxMalformationDist}. Otherwise, if a pixel of
+	 * opposite color is found along the line between the second pair of points, the minutia is removed when the
+	 * ratio of the two distances exceeds {@code minMalformationRatio}.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oLowFlowMap        block map of image blocks flagged as LOW RIDGE FLOW
+	 * @param mappedImageWidth   width of the map, in blocks
+	 * @param mappedImageHeight  height of the map, in blocks
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	@SuppressWarnings("java:S1066")
 	public int removeMalformations(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, int imageWidth,
 			int imageHeight, AtomicIntegerArray oLowFlowMap, int mappedImageWidth, int mappedImageHeight,
@@ -1033,7 +1138,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		int blockY;
 
 		if (isShowLogs())
-			logger.info("REMOVING MALFORMATIONS:");
+			logger.debug("REMOVING MALFORMATIONS:");
 
 		for (minutiaIndex = oMinutiae.get().getNum() - 1; minutiaIndex >= 0; minutiaIndex--) {
 			oMinutia.set(oMinutiae.get().getList().get(minutiaIndex));
@@ -1059,7 +1164,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 				}
 
 				if (isShowLogs())
-					logger.info("{},{} RMA", oMinutia.get().getX(), oMinutia.get().getY());
+					logger.debug("{},{} RMA", oMinutia.get().getX(), oMinutia.get().getY());
 
 				/* Then remove the minutia. */
 				ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -1102,7 +1207,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					}
 
 					if (isShowLogs())
-						logger.info("{},{} RMB", oMinutia.get().getX(), oMinutia.get().getY());
+						logger.debug("{},{} RMB", oMinutia.get().getX(), oMinutia.get().getY());
 
 					/* Then remove the minutia. */
 					ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -1138,7 +1243,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					if ((aDist == 0.0) || (bDist == 0.0)) {
 						/* Remove the malformation minutia. */
 						if (isShowLogs())
-							logger.info("{},{} RMMAL1", oMinutia.get().getX(), oMinutia.get().getY());
+							logger.debug("{},{} RMMAL1", oMinutia.get().getX(), oMinutia.get().getY());
 
 						ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
 						if (ret.get() != ILfs.FALSE) {
@@ -1157,7 +1262,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							if (bDist > lfsParams.getMaxMalformationDist()) {
 								/* Remove the malformation minutia. */
 								if (isShowLogs())
-									logger.info("{},{} RMMAL2", oMinutia.get().getX(), oMinutia.get().getY());
+									logger.debug("{},{} RMMAL2", oMinutia.get().getX(), oMinutia.get().getY());
 
 								ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
 								if (ret.get() != ILfs.FALSE) {
@@ -1193,7 +1298,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* Remove the malformation minutia. */
 										/* Then remove the minutia. */
 										if (isShowLogs())
-											logger.info("{},{} RMMAL3", oMinutia.get().getX(), oMinutia.get().getY());
+											logger.debug("{},{} RMMAL3", oMinutia.get().getX(), oMinutia.get().getY());
 
 										ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
 										if (ret.get() != ILfs.FALSE) {
@@ -1214,17 +1319,23 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeNearInvblocksV2 - Removes minutia points from the given list
-	 * #cat: that are sufficiently close to a block with invalid #cat: ridge flow or
-	 * to the edge of the image. Input: oMinutiae - list of true and false minutiae
-	 * directionMap - map of image blocks containing direction ridge flow
-	 * mappedImageWidth - width in blocks of the map mappedImageHeight - height in
-	 * blocks of the map lfsParams - parameters and thresholds for controlling LFS
-	 * Output: oMinutiae - list of pruned minutiae Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes minutia points that are too close to a block with INVALID ridge flow or to the edge of the image.
+	 *
+	 * <p>NIST origin: {@code remove_near_invblock_V2()} in {@code remove.c}. A minutia lying within
+	 * {@code invBlockMargin} pixels of its block boundary is checked against the neighboring block(s) in that
+	 * direction (including diagonals). If such a neighbor lies outside the image, the minutia is removed; if the
+	 * neighbor is INVALID, the minutia is removed when that neighbor has fewer than {@code rmValidNbrMin} valid
+	 * neighbors of its own.
+	 *
+	 * @param oMinutiae         holder of the list of true and false minutiae; pruned in place
+	 * @param directionMap      block map of directional ridge flow ({@link ILfs#INVALID_DIR} for invalid blocks)
+	 * @param mappedImageWidth  width of the map, in blocks
+	 * @param mappedImageHeight height of the map, in blocks
+	 * @param lfsParams         parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_620} (negative) if
+	 *         {@code invBlockMargin} exceeds half the block size; another negative value on system error
+	 */
 	public int removeNearInvblocksV2(AtomicReference<Minutiae> oMinutiae, AtomicIntegerArray directionMap,
 			final int mappedImageWidth, final int mappedImageHeight, final LfsParams lfsParams) {
 		int minutiaIndex;
@@ -1303,7 +1414,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		byte blockdy[] = { -1, -1, 0, 1, 1, 1, 0, -1, -1 }; /* Delta-Y */
 
 		if (isShowLogs())
-			logger.info("REMOVING MINUTIA NEAR INVALID BLOCKS:");
+			logger.debug("REMOVING MINUTIA NEAR INVALID BLOCKS:");
 
 		/* If the margin covers more than the entire block ... */
 		if (lfsParams.getInvBlockMargin() > (lfsParams.getBlockOffsetSize() >> 1)) {
@@ -1386,7 +1497,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					/* If neighbor's block coords are outside of map boundaries... */
 					if ((nbx < 0) || (nbx >= mappedImageWidth) || (nby < 0) || (nby >= mappedImageHeight)) {
 						if (isShowLogs())
-							logger.info("{},{} RM1", minutia.getX(), minutia.getY());
+							logger.debug("{},{} RM1", minutia.getX(), minutia.getY());
 
 						/* Then the minutia is in a margin adjacent to the edge of */
 						/* the image. */
@@ -1414,7 +1525,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* (ex. 7)... */
 						if (nvalid < lfsParams.getRmValidNbrMin()) {
 							if (isShowLogs())
-								logger.info("{},{} RM2", minutia.getX(), minutia.getY());
+								logger.debug("{},{} RM2", minutia.getX(), minutia.getY());
 
 							/* Then remove the current minutia from the list. */
 							if ((ret = getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae)) != ILfs.FALSE) {
@@ -1448,17 +1559,21 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removePointingInvblockV2 - Removes minutia points that are relatively
-	 * #cat: close in the direction opposite the minutia to a #cat: block with
-	 * INVALID ridge flow. Input: oMinutiae - list of true and false minutiae
-	 * directionMap - map of image blocks containing directional ridge flow
-	 * mappedImageWidth - width in blocks of the map mappedImageHeight - height in
-	 * blocks of the map lfsParams - parameters and thresholds for controlling LFS
-	 * Output: oMinutiae - list of pruned minutiae Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes minutia points that are relatively close, in the direction opposite the minutia, to a block with
+	 * INVALID ridge flow.
+	 *
+	 * <p>NIST origin: {@code remove_pointing_invblock_V2()} in {@code remove.c}. Each minutia point is translated
+	 * {@code transDirPixel} pixels opposite to its direction; if the translated point falls in an INVALID block,
+	 * the minutia is removed.
+	 *
+	 * @param oMinutiae         holder of the list of true and false minutiae; pruned in place
+	 * @param directionMap      block map of directional ridge flow ({@link ILfs#INVALID_DIR} for invalid blocks)
+	 * @param mappedImageWidth  width of the map, in blocks
+	 * @param mappedImageHeight height of the map, in blocks
+	 * @param lfsParams         parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removePointingInvblockV2(AtomicReference<Minutiae> oMinutiae, AtomicIntegerArray directionMap,
 			final int mappedImageWidth, final int mappedImageHeight, final LfsParams lfsParams) {
 		int minutiaIndex, ret;
@@ -1469,7 +1584,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		double dx, dy;
 
 		if (isShowLogs())
-			logger.info("REMOVING MINUTIA POINTING TO INVALID BLOCKS:");
+			logger.debug("REMOVING MINUTIA POINTING TO INVALID BLOCKS:");
 
 		/* Compute factor for converting integer directions to radians. */
 		piFactor = ILfs.M_PI / lfsParams.getNumDirections();
@@ -1509,7 +1624,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 			/* If the NMAP value of translated minutia point is INVALID ... */
 			if (dMapValue == ILfs.INVALID_DIR) {
 				if (isShowLogs())
-					logger.info("{},{} RM", minutia.getX(), minutia.getY());
+					logger.debug("{},{} RM", minutia.getX(), minutia.getY());
 
 				/* Remove the minutia from the minutiae list. */
 				if ((ret = getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae)) != ILfs.FALSE) {
@@ -1526,18 +1641,23 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeOverlaps - Takes a list of true and false minutiae and #cat:
-	 * attempts to detect and remove those false minutiae that #cat: are on opposite
-	 * sides of an overlap. Note that this #cat: routine does NOT edit the binary
-	 * image when overlaps #cat: are removed. Input: oMinutiae - list of true and
-	 * false minutiae binarizedImageData- binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image lfsParams - parameters and thresholds for controlling LFS Output:
-	 * oMinutiae - list of pruned minutiae Return Code: Zero - successful completion
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes false minutiae lying on opposite sides of an overlap.
+	 *
+	 * <p>NIST origin: {@code remove_overlaps()} in {@code remove.c}. The list is assumed sorted top-to-bottom.
+	 * Pairs of minutiae of the same type within {@code maxOverlapDist} pixels, with nearly opposite directions,
+	 * where the line joining them is compatible with their directions (or they are within
+	 * {@code maxOverlapJoinDist}) and a free path exists between them, are both removed. Unlike
+	 * {@link #removeHooksIslandsLakesOverlaps}, the binary image is NOT edited.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; {@link ILfs#ERROR_CODE_651} (negative) on an
+	 *         invalid direction difference; another negative value on system error
+	 */
 	public int removeOverlaps(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, int imageWidth,
 			int imageHeight, LfsParams lfsParams) {
 		int[] toRemoveIndexes;
@@ -1558,7 +1678,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		int halfNDirs;
 
 		if (isShowLogs())
-			logger.info("REMOVING OVERLAPS:");
+			logger.debug("REMOVING OVERLAPS:");
 
 		/* Allocate list of minutia indices that upon completion of testing */
 		/* should be removed from the minutiae lists. Note: That using */
@@ -1586,7 +1706,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 			/* If current first minutia not previously set to be removed. */
 			if (toRemoveIndexes[firstMinutiaIndex] != ILfs.TRUE) {
 				if (isShowLogs())
-					logger.info("");
+					logger.debug("");
 
 				/* Set first minutia to temporary pointer. */
 				oFirstMinutia.set(oMinutiae.get().getList().get(firstMinutiaIndex));
@@ -1597,7 +1717,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					oSecondMinutia.set(oMinutiae.get().getList().get(secondMinutiaIndex));
 
 					if (isShowLogs())
-						logger.info("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, oFirstMinutia.get().getX(),
+						logger.debug("1:{}({},{}){} 2:{}({},{}){} ", firstMinutiaIndex, oFirstMinutia.get().getX(),
 								oFirstMinutia.get().getY(), oFirstMinutia.get().getType(), secondMinutiaIndex,
 								oSecondMinutia.get().getX(), oSecondMinutia.get().getY(),
 								oSecondMinutia.get().getType());
@@ -1611,7 +1731,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					if (binarizedImageData[(oFirstMinutia.get().getY() * imageWidth)
 							+ oFirstMinutia.get().getX()] != oFirstMinutia.get().getType()) {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 						/* Then break out of secondary loop and skip to next first. */
 						break;
 					}
@@ -1630,7 +1750,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* If delta y small enough (ex. < 8 pixels) ... */
 						if (deltaY <= lfsParams.getMaxOverlapDist()) {
 							if (isShowLogs())
-								logger.info("1DY ");
+								logger.debug("1DY ");
 
 							/* Compute Euclidean distance between 1st & 2nd mintuae. */
 							dDistance = getLfsUtil().distance(oFirstMinutia.get().getX(), oFirstMinutia.get().getY(),
@@ -1638,7 +1758,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							/* If distance is NOT too large (ex. < 8 pixels) ... */
 							if (dDistance <= lfsParams.getMaxOverlapDist()) {
 								if (isShowLogs())
-									logger.info("2DS ");
+									logger.debug("2DS ");
 
 								/* Compute "inner" difference between directions on */
 								/* a full circle and test. */
@@ -1653,7 +1773,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								/* more likely they should be joined) */
 								if (deltaDir > minDeltaDir) {
 									if (isShowLogs())
-										logger.info("3DD ");
+										logger.debug("3DD ");
 
 									/* If 1st & 2nd minutiae are same type ... */
 									if (oFirstMinutia.get().getType() == oSecondMinutia.get().getType()) {
@@ -1677,7 +1797,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										joinDir = Math.min(joinDir, fullNDirs - joinDir);
 
 										if (isShowLogs())
-											logger.info("joindir={} dist=%f ", joinDir, dDistance);
+											logger.debug("joindir={} dist=%f ", joinDir, dDistance);
 
 										/* If the joining angle is <= 90 degrees OR */
 										/* the 2 points are sufficiently close AND */
@@ -1688,7 +1808,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 														oSecondMinutia.get().getY(), binarizedImageData, imageWidth,
 														imageHeight, lfsParams) == ILfs.TRUE) {
 											if (isShowLogs())
-												logger.info("4OV RM");
+												logger.debug("4OV RM");
 
 											/* Then assume overlap, so ... */
 											/* Set to remove first minutia. */
@@ -1700,36 +1820,36 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										/* to next second minutia. */
 										else {
 											if (isShowLogs())
-												logger.info("");
+												logger.debug("");
 										}
 									} else {
 										if (isShowLogs())
-											logger.info("");
+											logger.debug("");
 									}
 									/* End same type test. */
 								} // End deltadir test.
 								else {
 									if (isShowLogs())
-										logger.info("");
+										logger.debug("");
 								}
 							} // End distance test.
 							else {
 								if (isShowLogs())
-									logger.info("");
+									logger.debug("");
 							}
 						}
 						/* Otherwise, current 2nd too far below 1st, so skip to next */
 						/* 1st minutia. */
 						else {
 							if (isShowLogs())
-								logger.info("");
+								logger.debug("");
 							/* Break out of inner secondary loop. */
 							break;
 						} // End delta-y test.
 					} // End if !to_remove[s]
 					else {
 						if (isShowLogs())
-							logger.info("");
+							logger.debug("");
 					}
 
 					/* Bump to next second minutia in minutiae list. */
@@ -1760,21 +1880,31 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removePoresV2 - Attempts to detect and remove minutia points located on
-	 * #cat: pore-shaped valleys and/or ridges. Detection for #cat: these features
-	 * are only performed in blocks with #cat: LOW RIDGE FLOW or HIGH CURVATURE.
-	 * Input: oMinutiae - list of true and false minutiae binarizedImageData -
-	 * binary image data (0==while & 1==black) imageWidth - width (in pixels) of
-	 * image imageHeight - height (in pixels) of image oDirectionMap - map of image
-	 * blocks containing directional ridge flow oLowFlowMap - map of image blocks
-	 * flagged as LOW RIDGE FLOW oHighCurveMap - map of image blocks flagged as HIGH
-	 * CURVATURE mappedImageWidth - width in blocks of the maps mappedImageHeight -
-	 * height in blocks of the maps lfsParams - parameters and thresholds for
-	 * controlling LFS Output: oMinutiae - list of pruned minutiae Return Code: Zero
-	 * - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Detects and removes minutia points located on pore-shaped valleys and/or ridges.
+	 *
+	 * <p>NIST origin: {@code remove_pores_V2()} in {@code remove.c}. Only minutiae in blocks with LOW RIDGE FLOW
+	 * or HIGH CURVATURE and a VALID direction are tested; others are kept. From a point R located
+	 * {@code poresTransR} pixels behind the minutia, the method searches perpendicularly (up to
+	 * {@code poresPerpSteps} steps) for edge points P and Q on either side of the feature, and traces their
+	 * contours forward ({@code poresStepsFwd}) and backward ({@code poresStepsBwd}). The minutia is removed if P
+	 * or Q cannot be found, if a contour trace is incomplete or forms a loop, or if the shape is pore-like: with
+	 * A, B the end points of the contours traced from P and C, D those traced from Q, the squared distance
+	 * {@code |CD|^2} exceeds {@code poresMinDist2} and the ratio {@code |AB|^2 / |CD|^2} is at most
+	 * {@code poresMaxRatio}.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oDirectionMap      block map of directional ridge flow
+	 * @param oLowFlowMap        block map of blocks flagged as LOW RIDGE FLOW
+	 * @param oHighCurveMap      block map of blocks flagged as HIGH CURVATURE
+	 * @param mappedImageWidth   width of the maps, in blocks
+	 * @param mappedImageHeight  height of the maps, in blocks
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removePoresV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, int imageWidth,
 			int imageHeight, AtomicIntegerArray oDirectionMap, AtomicIntegerArray oLowFlowMap,
 			AtomicIntegerArray oHighCurveMap, int mappedImageWidth, int mappedImageHeight, LfsParams lfsParams) {
@@ -1845,7 +1975,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		/*                                                                  */
 
 		if (isShowLogs())
-			logger.info("REMOVING PORES:");
+			logger.debug("REMOVING PORES:");
 
 		/* Factor for converting integer directions into radians. */
 		piFactor = Math.PI / lfsParams.getNumDirections();
@@ -1918,7 +2048,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 							}
 
 							if (isShowLogs())
-								logger.info("{},{} RMB", minutia.get().getX(), minutia.get().getY());
+								logger.debug("{},{} RMB", minutia.get().getX(), minutia.get().getY());
 
 							/* Then remove the minutia. */
 							ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -1960,7 +2090,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								}
 
 								if (isShowLogs())
-									logger.info("{},{} RMD", minutia.get().getX(), minutia.get().getY());
+									logger.debug("{},{} RMD", minutia.get().getX(), minutia.get().getY());
 
 								/* Then remove the minutia. */
 								ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2012,7 +2142,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 										}
 
 										if (isShowLogs())
-											logger.info("{},{} RMA", minutia.get().getX(), minutia.get().getY());
+											logger.debug("{},{} RMA", minutia.get().getX(), minutia.get().getY());
 
 										/* Then remove the minutia. */
 										ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2057,7 +2187,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 											}
 
 											if (isShowLogs())
-												logger.info("{},{} RMC", minutia.get().getX(), minutia.get().getY());
+												logger.debug("{},{} RMC", minutia.get().getX(), minutia.get().getY());
 
 											/* Then remove the minutia. */
 											ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2092,13 +2222,13 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 												/* If ratio is small enough (ex. 2.25)... */
 												if (ratio <= lfsParams.getPoresMaxRatio()) {
 													if (isShowLogs()) {
-														logger.info("{},{}", minutia.get().getX(),
+														logger.debug("{},{}", minutia.get().getX(),
 																minutia.get().getY());
-														logger.info(
+														logger.debug(
 																"R={},{} P={},{} B={},{} D={},{} Q={},{} A={},{} C={},{} ",
 																rx, ry, px.get(), py.get(), bx, by, dx, dy, qx.get(),
 																qy.get(), ax, ay, cx, cy);
-														logger.info("RMRATIO %f", ratio);
+														logger.debug("RMRATIO %f", ratio);
 													}
 													/* Then assume pore & remove minutia. */
 													ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2118,7 +2248,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 								/* Otherwise, Q not found ... */
 								else {
 									if (isShowLogs())
-										logger.info("{},{} RMQ", minutia.get().getX(), minutia.get().getY());
+										logger.debug("{},{} RMQ", minutia.get().getX(), minutia.get().getY());
 
 									/* Then remove the minutia. */
 									ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2135,7 +2265,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					/* Otherwise, P not found ... */
 					else {
 						if (isShowLogs())
-							logger.info("{},{} RMP", minutia.get().getX(), minutia.get().getY());
+							logger.debug("{},{} RMP", minutia.get().getX(), minutia.get().getY());
 
 						/* Then remove the minutia. */
 						ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2163,20 +2293,28 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeOrAdjustSideMinutiaeV2 - Removes loops or minutia points that
-	 * #cat: are not on complete contours of specified length. If the #cat: contour
-	 * is complete, then the minutia is adjusted based #cat: on a minmax analysis of
-	 * the rotated y-coords of the contour. Input: oMinutiae - list of true and
-	 * false minutiae binarizedImageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image directionMap - map of image blocks containing directional ridge flow
-	 * mappedImageWidth - width (in blocks) of the map mappedImageHeight - height
-	 * (in blocks) of the map lfsParams - parameters and thresholds for controlling
-	 * LFS Output: oMinutiae - list of pruned minutiae Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Removes minutiae not on complete contours of the required length, and adjusts the others from a min/max
+	 * analysis of their rotated contour.
+	 *
+	 * <p>NIST origin: {@code remove_or_adjust_side_minutiae_V2()} in {@code remove.c}. A contour of
+	 * {@code 2 * sideHalfContour + 1} points centered on each minutia is extracted; if it is incomplete, forms a
+	 * loop or must be ignored, the minutia is removed. Otherwise the contour y-coordinates are rotated by the
+	 * negative of the minutia direction, so that a well-formed minutia forms an upward bowl, and their relative
+	 * minima/maxima are located. With exactly one minimum, or a min-max-min pattern (the lower minimum chosen),
+	 * the minutia is moved to that contour point, and removed if it now lies in an INVALID block; any other
+	 * pattern causes removal. Note: if the contour has fewer than 3 points the method returns immediately.
+	 *
+	 * @param oMinutiae          holder of the list of true and false minutiae; pruned and adjusted in place
+	 * @param binarizedImageData binary image data ({@code 0} = white, {@code 1} = black), row-major
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param directionMap       block map of directional ridge flow
+	 * @param mappedImageWidth   width of the map, in blocks
+	 * @param mappedImageHeight  height of the map, in blocks
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#FALSE} (zero) on successful completion; a negative value on system error
+	 */
 	public int removeOrAdjustSideMinutiaeV2(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, AtomicIntegerArray directionMap, final int mappedImageWidth,
 			final int mappedImageHeight, final LfsParams lfsParams) {
@@ -2201,7 +2339,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 		int blockY;
 
 		if (isShowLogs())
-			logger.info("ADJUSTING SIDE MINUTIA:");
+			logger.debug("ADJUSTING SIDE MINUTIA:");
 
 		/* Allocate working memory for holding rotated y-coord of a */
 		/* minutia's contour. */
@@ -2232,7 +2370,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 			/* other reason ... */
 			if ((ret.get() == ILfs.LOOP_FOUND) || (ret.get() == ILfs.IGNORE) || (ret.get() == ILfs.INCOMPLETE)) {
 				if (isShowLogs())
-					logger.info("{},{} RM1", minutia.getX(), minutia.getY());
+					logger.debug("{},{} RM1", minutia.getX(), minutia.getY());
 
 				/* Remove minutia from list. */
 				ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));
@@ -2319,7 +2457,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 				/* of contour ... */
 				if ((minmaxNum.get() == 1) && (minmaxType.get(0) == -1)) {
 					if (isShowLogs())
-						logger.info("{},{} ", minutia.getX(), minutia.getY());
+						logger.debug("{},{} ", minutia.getX(), minutia.getY());
 
 					/* Reset loation of minutia point to contour point at minima. */
 					minutia.setX(contour.getContourX().get(minmaxIndex.get(0)));
@@ -2350,12 +2488,12 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* into position pointed to by 'i'. */
 
 						if (isShowLogs())
-							logger.info("RM2");
+							logger.debug("RM2");
 					} else {
 						/* Advance to the next minutia in the list. */
 						minutiaIndex++;
 						if (isShowLogs())
-							logger.info("AD1 {},{}", minutia.getX(), minutia.getY());
+							logger.debug("AD1 {},{}", minutia.getX(), minutia.getY());
 					}
 				}
 				/* If exactly 3 min/max found and they are min-max-min ... */
@@ -2368,7 +2506,7 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 					}
 
 					if (isShowLogs())
-						logger.info("{},{} ", minutia.getX(), minutia.getY());
+						logger.debug("{},{} ", minutia.getX(), minutia.getY());
 
 					/* Reset loation of minutia point to contour point at minima. */
 					minutia.setX(contour.getContourX().get(minLoc));
@@ -2400,18 +2538,18 @@ public class RemoveMinutia extends MindTct implements IRemoveMinutia {
 						/* into position pointed to by 'i'. */
 
 						if (isShowLogs())
-							logger.info("RM3");
+							logger.debug("RM3");
 					} else {
 						/* Advance to the next minutia in the list. */
 						minutiaIndex++;
 						if (isShowLogs())
-							logger.info("AD2 {},{}", minutia.getX(), minutia.getY());
+							logger.debug("AD2 {},{}", minutia.getX(), minutia.getY());
 					}
 				}
 				/* Otherwise, ... */
 				else {
 					if (isShowLogs())
-						logger.info("{},{} RM4", minutia.getX(), minutia.getY());
+						logger.debug("{},{} RM4", minutia.getX(), minutia.getY());
 
 					/* Remove minutia from list. */
 					ret.set(getMinutiaHelper().removeMinutia(minutiaIndex, oMinutiae));

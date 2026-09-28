@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  MOSIP NFIQ 2.0 — Java port of NIST Fingerprint Image Quality 2 (v2.3.0)
+  ============================================================================
+  Artifact : io.mosip:nfiq2.0 (plain library JAR — no Spring Boot app, no HTTP)
+  Parent   : io.mosip:nfiq (../pom.xml) → spring-boot-starter-parent.
+             Java 21 + preview, plugin versions, MOSIP/third-party versions,
+             JaCoCo 90% gate, Sonar and Maven Central publishing are inherited.
+  This POM : dependencies, JAR manifest, bundled license files, target/lib copy,
+             sample-ISO handling.
+
+  Licensing: MPL-2.0, except package org.mosip.nist.nfiq2.frfxll (Java port of
+             DigitalPersona FingerJetFX OSE), which is LGPL-3.0-or-later plus the
+             conditions in ../licenses/FingerJetFX-OSE-COPYRIGHT.txt.
+
+  Build    : mvn clean install "-Dgpg.skip=true"   (here, or from the repo root)
+  ============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>io.mosip</groupId>
+		<artifactId>nfiq</artifactId>
+		<version>0.1.2-SNAPSHOT</version>
+		<relativePath>../pom.xml</relativePath>
+	</parent>
+
+	<artifactId>nfiq2.0</artifactId>
+	<!-- Same as the parent version; kept explicit because CI and release tooling read it here. -->
+	<version>0.1.2-SNAPSHOT</version>
+	<packaging>jar</packaging>
+	<name>nfiq2.0</name>
+	<description>
+		MOSIP NFIQ 2.0: a Java port of NIST Fingerprint Image Quality 2 (v2.3.0,
+		ISO/IEC 29794-4). Decodes JPEG2000 / WSQ fingerprints from ISO/IEC 19794-4 records,
+		computes the NFIQ 2 native quality measures (including FingerJetFX OSE minutiae) and
+		returns the unified quality score 0 (worst) .. 100 (best) from the NIST random forest.
+		Image operations use OpenCV (org.openpnp:opencv), as NIST does.
+	</description>
+	<url>https://github.com/mosip/nfiq</url>
+
+	<!--
+		Declared again here (not only in the parent) because Maven Central validates each
+		published POM, and inherited url/scm values would otherwise get "/nfiq2.0" appended.
+	-->
+	<licenses>
+		<license>
+			<name>MPL 2.0</name>
+			<url>https://www.mozilla.org/en-US/MPL/2.0/</url>
+			<distribution>repo</distribution>
+		</license>
+		<license>
+			<name>LGPL-3.0-or-later</name>
+			<url>https://www.gnu.org/licenses/lgpl-3.0.html</url>
+			<distribution>repo</distribution>
+			<comments>Package org.mosip.nist.nfiq2.frfxll only (port of DigitalPersona FingerJetFX OSE).</comments>
+		</license>
+	</licenses>
+
+	<scm>
+		<connection>scm:git:git://github.com/mosip/nfiq.git</connection>
+		<developerConnection>scm:git:ssh://github.com:mosip/nfiq.git</developerConnection>
+		<url>https://github.com/mosip/nfiq</url>
+		<tag>HEAD</tag>
+	</scm>
+
+	<developers>
+		<developer>
+			<name>MOSIP</name>
+			<email>mosip.emailnotifier@gmail.com</email>
+			<organization>io.mosip</organization>
+			<organizationUrl>https://github.com/mosip/nfiq</organizationUrl>
+		</developer>
+	</developers>
+
+	<dependencies>
+		<!-- ── MOSIP ─────────────────────────────────────────────────────────── -->
+		<!-- Decodes ISO fingerprint records to raw greyscale pixels before scoring. -->
+		<dependency>
+			<groupId>io.mosip.biometric.util</groupId>
+			<artifactId>biometrics-util</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>io.mosip.kernel</groupId>
+					<artifactId>kernel-core</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!-- Runtime classes for biometrics-util only; its transitive graph is cut (see nfiq1.0/pom.xml). -->
+		<dependency>
+			<groupId>io.mosip.kernel</groupId>
+			<artifactId>kernel-core</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+
+		<!--
+			Nfiq2Exception extends kernel-core BaseUncheckedException, whose getMessage() goes through
+			kernel ExceptionUtils; that class needs Jackson Afterburner, which the wildcard exclusion
+			above removes. Version from the Spring Boot Jackson BOM. License: Apache-2.0.
+		-->
+		<dependency>
+			<groupId>com.fasterxml.jackson.module</groupId>
+			<artifactId>jackson-module-afterburner</artifactId>
+		</dependency>
+
+		<!-- ── Image codecs (versions managed in the parent) ─────────────────── -->
+		<dependency>
+			<groupId>com.github.jai-imageio</groupId>
+			<artifactId>jai-imageio-jpeg2000</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>com.github.mhshams</groupId>
+			<artifactId>jnbis</artifactId>
+		</dependency>
+
+		<!-- ── OpenCV Java bindings + native libraries. ──────────────────────── -->
+		<dependency>
+			<groupId>org.openpnp</groupId>
+			<artifactId>opencv</artifactId>
+		</dependency>
+
+		<!-- ── Logging: facade only, the consuming service supplies the backend. ── -->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+		</dependency>
+
+		<!-- ── Test: JUnit Jupiter, Mockito, AssertJ, Logback (test scope). ────── -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<!--
+			FingerJetFX OSE conditions 2 and 3 require its copyright notice to ship with every
+			redistribution, so the notice and the LGPL text go into META-INF/licenses of the JAR.
+		-->
+		<resources>
+			<resource>
+				<directory>src/main/resources</directory>
+			</resource>
+			<resource>
+				<directory>../licenses</directory>
+				<targetPath>META-INF/licenses</targetPath>
+				<includes>
+					<include>FingerJetFX-OSE-COPYRIGHT.txt</include>
+					<include>LGPL-3.0-only.txt</include>
+				</includes>
+			</resource>
+		</resources>
+		<!--
+			Tests and the run-local-* launchers read src/test/resources/*.iso in place, so the ISO
+			files are never copied into target/.
+		-->
+		<testResources>
+			<testResource>
+				<directory>src/test/resources</directory>
+				<excludes>
+					<exclude>**/*.iso</exclude>
+				</excludes>
+			</testResource>
+		</testResources>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<archive>
+						<manifest>
+							<addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+						</manifest>
+						<manifestEntries>
+							<Project-Name>${project.name}</Project-Name>
+							<Project-Version>${project.version}</Project-Version>
+							<Implementation-Vendor>MOSIP</Implementation-Vendor>
+						</manifestEntries>
+					</archive>
+				</configuration>
+			</plugin>
+
+			<!--
+				Copies jars to target/lib for the sample harness classpath (run-local-JP2 / run-local-WSQ).
+				Test scope so the Logback backend (test-only here) is present when Nfiq2Application runs.
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-dependency-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>copy</id>
+						<phase>prepare-package</phase>
+						<goals>
+							<goal>copy-dependencies</goal>
+						</goals>
+						<configuration>
+							<outputDirectory>${project.build.directory}/lib</outputDirectory>
+							<includeScope>test</includeScope>
+							<overWriteReleases>false</overWriteReleases>
+							<overWriteSnapshots>false</overWriteSnapshots>
+							<overWriteIfNewer>true</overWriteIfNewer>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>

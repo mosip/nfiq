@@ -419,6 +419,89 @@ class QualityTest {
     }
 
     /**
+     * Validates getNeighborhoodStats returns zero statistics for minutiae too close to the
+     * right or bottom border, while an interior minutia sees the real pixel values.
+     */
+    @Test
+    void getNeighborhoodStatsRightAndBottomBorders() {
+        int[] imageData = new int[20 * 20];
+        java.util.Arrays.fill(imageData, 200);
+        AtomicReference<Double> mean = new AtomicReference<>();
+        AtomicReference<Double> stdev = new AtomicReference<>();
+
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(10, 10), imageData, 20, 20, 3);
+        assertEquals(200.0, mean.get(), 1e-9);
+        assertEquals(0.0, stdev.get(), 1e-9);
+
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(17, 10), imageData, 20, 20, 3);
+        assertEquals(0.0, mean.get());
+        assertEquals(0.0, stdev.get());
+
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(10, 17), imageData, 20, 20, 3);
+        assertEquals(0.0, mean.get());
+        assertEquals(0.0, stdev.get());
+
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(10, 1), imageData, 20, 20, 3);
+        assertEquals(0.0, mean.get());
+    }
+
+    /**
+     * Validates getNeighborhoodStats reports zero statistics when the neighbourhood contains
+     * no pixels at all (negative radius).
+     */
+    @Test
+    void getNeighborhoodStatsNegativeRadiusHasNoSamples() {
+        int[] imageData = new int[20 * 20];
+        java.util.Arrays.fill(imageData, 200);
+        AtomicReference<Double> mean = new AtomicReference<>(-1.0);
+        AtomicReference<Double> stdev = new AtomicReference<>(-1.0);
+
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(10, 10), imageData, 20, 20, -1);
+
+        assertEquals(0.0, mean.get());
+        assertEquals(0.0, stdev.get());
+    }
+
+    /**
+     * Validates getNeighborhoodStats computes the population mean and standard deviation of a
+     * two-valued neighbourhood.
+     */
+    @Test
+    void getNeighborhoodStatsComputesMeanAndStdDev() {
+        int width = 10;
+        int[] imageData = new int[width * width];
+        for (int i = 0; i < imageData.length; i++) {
+            imageData[i] = (i % width) % 2 == 0 ? 100 : 200;
+        }
+        AtomicReference<Double> mean = new AtomicReference<>();
+        AtomicReference<Double> stdev = new AtomicReference<>();
+
+        // 3x3 neighbourhood centred on x=5: columns 4,5,6 -> 100,200,100
+        quality.getNeighborhoodStats(mean, stdev, createTestMinutia(5, 5), imageData, width, width, 1);
+
+        double expectedMean = (6 * 100 + 3 * 200) / 9.0;
+        double expectedVar = (6 * 100 * 100 + 3 * 200 * 200) / 9.0 - expectedMean * expectedMean;
+        assertEquals(expectedMean, mean.get(), 1e-9);
+        assertEquals(Math.sqrt(expectedVar), stdev.get(), 1e-9);
+    }
+
+    /**
+     * Validates reliabilityFromQualityMap propagates a pixelizeMap failure without touching
+     * the minutiae reliabilities.
+     */
+    @Test
+    void reliabilityFromQualityMapPixelizeError() {
+        Minutiae minutiae = createTestMinutiaeWithCorrectPositions();
+        minutiae.getList().get(0).setReliability(0.42);
+        when(mockMaps.pixelizeMap(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), anyInt())).thenReturn(-7);
+
+        int result = quality.reliabilityFromQualityMap(minutiae, mockMaps, 10, 10, 8);
+
+        assertEquals(-7, result);
+        assertEquals(0.42, minutiae.getList().get(0).getReliability());
+    }
+
+    /**
      * Creates test Maps instance with specified dimensions and proper array sizing.
      */
     private Maps createTestMaps(int width, int height) {

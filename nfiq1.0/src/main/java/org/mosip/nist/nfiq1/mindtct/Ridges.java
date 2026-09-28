@@ -15,14 +15,37 @@ import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Neighbour finding and ridge counting between minutiae for MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code ridges.c}. For each detected minutia, locates up to
+ * {@link LfsParams#getMaxNbrs()} closest neighbours (searching the
+ * column-sorted minutia list), sorts them clockwise starting from vertical, and
+ * counts the number of intervening ridges along the straight line to each
+ * neighbour, validating each candidate ridge crossing by contour tracing.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state of its own (results are
+ * written into the passed {@link Minutiae}).
+ */
 public class Ridges extends MindTct implements IRidges {
+	/** SLF4J logger for diagnostics (when logs are enabled) and errors. */
 	private static final Logger logger = LoggerFactory.getLogger(Ridges.class);
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Ridges instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Ridges() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Ridges} instance
+	 */
 	public static synchronized Ridges getInstance() {
 		if (instance == null) {
 			synchronized (Ridges.class) {
@@ -34,85 +57,169 @@ public class Ridges extends MindTct implements IRidges {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (modulo and rounding utilities).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link ImageUtil} helper.
+	 *
+	 * @return the {@code ImageUtil} singleton
+	 */
 	public ImageUtil getImageUtil() {
 		return ImageUtil.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Globals} tables.
+	 *
+	 * @return the {@code Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link LfsUtil} helper (distances, angles, sorted
+	 * insertion).
+	 *
+	 * @return the {@code LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release buffers.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Init} helper.
+	 *
+	 * @return the {@code Init} singleton
+	 */
 	public Init getInit() {
 		return Init.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Binarization} helper.
+	 *
+	 * @return the {@code Binarization} singleton
+	 */
 	public Binarization getBinarization() {
 		return Binarization.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link MinutiaHelper} (minutia sorting and duplicate
+	 * removal).
+	 *
+	 * @return the {@code MinutiaHelper} singleton
+	 */
 	public MinutiaHelper getMinutiaHelper() {
 		return MinutiaHelper.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Sort} helper.
+	 *
+	 * @return the {@code Sort} singleton
+	 */
 	public Sort getSort() {
 		return Sort.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Detect} helper.
+	 *
+	 * @return the {@code Detect} singleton
+	 */
 	public Detect getDetect() {
 		return Detect.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link RemoveMinutia} helper.
+	 *
+	 * @return the {@code RemoveMinutia} singleton
+	 */
 	public RemoveMinutia getRemoveMinutia() {
 		return RemoveMinutia.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Line} helper (line rasterization).
+	 *
+	 * @return the {@code Line} singleton
+	 */
 	public Line getLine() {
 		return Line.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Contour} helper (contour tracing).
+	 *
+	 * @return the {@code Contour} singleton
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Maps} helper.
+	 *
+	 * @return the {@code Maps} singleton
+	 */
 	public Maps getMap() {
 		return Maps.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Loop} helper.
+	 *
+	 * @return the {@code Loop} singleton
+	 */
 	public Loop getLoop() {
 		return Loop.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: countMinutiaeRidges - Takes a list of oMinutiae, and for each one,
-	 * #cat: determines its closest neighbors and counts the number #cat: of
-	 * interveining ridges between the minutia point and #cat: each of its
-	 * neighbors. Input: oMinutiae - list of oMinutiae binarizedImageData - binary
-	 * image data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image lfsParams - parameters and
-	 * thresholds for controlling LFS Output: oMinutiae - list of oMinutiae
-	 * augmented with neighbors and ridge counts Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a list of minutiae and, for each one, determines its closest
+	 * neighbours and counts the number of intervening ridges between the minutia
+	 * point and each of its neighbours.
+	 * <p>
+	 * NIST: {@code count_minutiae_ridges()}. The minutiae are first sorted on x
+	 * then y (column-oriented) and duplicates are removed, so the list referenced
+	 * by {@code oMinutiae} is reordered and may shrink.
+	 *
+	 * @param oMinutiae          input/output: list of minutiae; on return sorted,
+	 *                           de-duplicated and augmented with neighbours and
+	 *                           ridge counts
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error
+	 */
 	public int countMinutiaeRidges(AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight, final LfsParams lfsParams) {
 		int ret;
 		int minutiaIndex;
 
 		if (isShowLogs())
-			logger.info("\nFINDING NBRS AND COUNTING RIDGES:\n");
+			logger.debug("\nFINDING NBRS AND COUNTING RIDGES:\n");
 
 		/* Sort minutia points on x then y (column-oriented). */
 		if ((ret = getMinutiaHelper().sortMinutiaeLeftToRightAndThenTopToBottom(oMinutiae, imageWidth,
@@ -140,17 +247,27 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: countMinutiaRidges - Takes a minutia, and determines its closest #cat:
-	 * neighbors and counts the number of interveining ridges #cat: between the
-	 * minutia point and each of its neighbors. Input: oMinutiae - input minutia
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * minutia augmented with neighbors and ridge counts Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a minutia and determines its closest neighbours and counts the
+	 * number of intervening ridges between the minutia point and each of its
+	 * neighbours.
+	 * <p>
+	 * NIST: {@code count_minutia_ridges()}. Neighbours are found with
+	 * {@link #findNeighbors}, sorted with {@link #sortNeighbors} and each ridge
+	 * count is computed with {@link #ridgeCount}. If no neighbours are found the
+	 * minutia is left unchanged.
+	 *
+	 * @param first              index of the primary minutia in the list
+	 * @param oMinutiae          input/output: list of minutiae; on return the
+	 *                           primary minutia's neighbour list, ridge counts
+	 *                           and neighbour count are set
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error
+	 */
 	public int countMinutiaRidges(final int first, AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight, final LfsParams lfsParams) {
 		int i, ret;
@@ -167,7 +284,7 @@ public class Ridges extends MindTct implements IRidges {
 		}
 
 		if (isShowLogs())
-			logger.info(MessageFormat.format("NBRS FOUND: %d, %d = %d\n", oMinutiae.get().getList().get(first).getX(),
+			logger.debug(MessageFormat.format("NBRS FOUND: %d, %d = %d\n", oMinutiae.get().getList().get(first).getX(),
 					oMinutiae.get().getList().get(first).getY(), oNoOfNbrs.get()));
 
 		/* If no neighors found ... */
@@ -212,19 +329,27 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: findNeighbors - Takes a primary minutia and a list of all oMinutiae
-	 * #cat: and locates a specified maximum number of closest neighbors #cat: to
-	 * the primary point. Neighbors are searched, starting #cat: in the same pixel
-	 * column, below, the primary point and then #cat: along consecutive and
-	 * complete pixel columns in the image #cat: to the right of the primary point.
-	 * Input: maxNbrs - maximum number of closest neighbors to be returned
-	 * firstMinutiaIndex - index of the primary minutia point oMinutiae - list of
-	 * oMinutiae Output: oNbrList - points to list of detected closest neighbors
-	 * oNoOfNbrs - points to number of neighbors returned Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a primary minutia and a list of all minutiae and locates a specified
+	 * maximum number of closest neighbours to the primary point.
+	 * <p>
+	 * NIST: {@code find_neighbors()}. Neighbours are searched starting in the
+	 * same pixel column, below the primary point, and then along consecutive and
+	 * complete pixel columns in the image to the right of the primary point (the
+	 * list must already be sorted on x then y). The search stops once the list is
+	 * full and the x-distance alone exceeds the largest stored distance.
+	 *
+	 * @param oNbrList          output: list of detected closest neighbour
+	 *                          indices (pre-allocated with at least
+	 *                          {@code maxNbrs} entries)
+	 * @param oNoOfNbrs         output: number of neighbours returned
+	 * @param maxNbrs           maximum number of closest neighbours to be
+	 *                          returned
+	 * @param firstMinutiaIndex index of the primary minutia point
+	 * @param oMinutiae         list of minutiae
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error
+	 */
 	public int findNeighbors(AtomicIntegerArray oNbrList, AtomicInteger oNoOfNbrs, final int maxNbrs,
 			final int firstMinutiaIndex, AtomicReference<Minutiae> oMinutiae) {
 		int ret, secondMinutiaIndex, lastNbr;
@@ -301,23 +426,31 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: updateNbrDists - Takes the current list of neighbors along with a #cat:
-	 * primary minutia and a potential new neighbor, and #cat: determines if the new
-	 * neighbor is sufficiently close #cat: to be added to the list of nearest
-	 * neighbors. If added, #cat: it is placed in the list in its proper order based
-	 * on #cat: squared distance to the primary point. Input: oNbrList - current
-	 * list of nearest neighbor minutia indices oNbrSqrDists - corresponding squared
-	 * euclidean distance of each neighbor to the primary minutia point oNoOfNbrs -
-	 * number of neighbors currently in the list maxNbrs - maximum number of closest
-	 * neighbors to be returned firstMinutiaIndex - index of the primary minutia
-	 * point secondMinutiaIndex - index of the secondary (new neighbor) point
-	 * oMinutiae - list of oMinutiae Output: nbrList - updated list of nearest
-	 * neighbor indices nbrSqrDists - updated list of nearest neighbor distances
-	 * noOfNbrs - number of neighbors in the update lists Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes the current list of neighbours along with a primary minutia and a
+	 * potential new neighbour, and determines whether the new neighbour is
+	 * sufficiently close to be added to the list of nearest neighbours.
+	 * <p>
+	 * NIST: {@code update_nbr_dists()}. If added, the neighbour is placed in the
+	 * list in its proper order based on squared distance to the primary point.
+	 *
+	 * @param oNbrList           input/output: current list of nearest neighbour
+	 *                           minutia indices; updated on return
+	 * @param oNbrSqrDists       input/output: corresponding squared Euclidean
+	 *                           distance of each neighbour to the primary minutia
+	 *                           point; updated on return
+	 * @param oNoOfNbrs          input/output: number of neighbours currently in
+	 *                           the lists; updated on return
+	 * @param maxNbrs            maximum number of closest neighbours to be
+	 *                           returned
+	 * @param firstMinutiaIndex  index of the primary minutia point
+	 * @param secondMinutiaIndex index of the secondary (new neighbour) point
+	 * @param oMinutiae          list of minutiae
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (whether or not
+	 *         the neighbour was inserted); negative on system error:
+	 *         {@link ILfs#ERROR_CODE_470} illegal insertion position,
+	 *         {@link ILfs#ERROR_CODE_471} insertion failed
+	 */
 	public int updateNbrDists(AtomicIntegerArray oNbrList, AtomicReferenceArray<Double> oNbrSqrDists,
 			AtomicInteger oNoOfNbrs, final int maxNbrs, final int firstMinutiaIndex, final int secondMinutiaIndex,
 			AtomicReference<Minutiae> oMinutiae) {
@@ -370,22 +503,30 @@ public class Ridges extends MindTct implements IRidges {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: insertNeighbor - Takes a minutia index and its squared distance to a
-	 * #cat: primary minutia point, and inserts them in the specified #cat: position
-	 * of their respective lists, shifting previously #cat: stored values down and
-	 * off the lists as necessary. Input: nbrListPos - postions where values are to
-	 * be inserted in lists nbrIndex - index of minutia being inserted nbrDist2 -
-	 * squared distance of minutia to its primary point oNbrList - current list of
-	 * nearest neighbor minutia indices oNbrSqrDists - corresponding squared
-	 * euclidean distance of each neighbor to the primary minutia point oNoOfNbrs -
-	 * number of neighbors currently in the list maxNbrs - maximum number of closest
-	 * neighbors to be returned Output: nbrList - updated list of nearest neighbor
-	 * indices nbrSqrDists - updated list of nearest neighbor distances noOfNbrs -
-	 * number of neighbors in the update lists Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a minutia index and its squared distance to a primary minutia point,
+	 * and inserts them in the specified position of their respective lists,
+	 * shifting previously stored values down and off the lists as necessary.
+	 * <p>
+	 * NIST: {@code insert_neighbor()}. If the lists are full, the last
+	 * neighbour is dropped to make room.
+	 *
+	 * @param nbrListPos   position where values are to be inserted in the lists
+	 *                     (zero-oriented)
+	 * @param nbrIndex     index of minutia being inserted
+	 * @param nbrDist2     squared distance of minutia to its primary point
+	 * @param oNbrList     input/output: current list of nearest neighbour minutia
+	 *                     indices; updated on return
+	 * @param oNbrSqrDists input/output: corresponding squared Euclidean distance
+	 *                     of each neighbour to the primary minutia point; updated
+	 *                     on return
+	 * @param oNoOfNbrs    input/output: number of neighbours currently in the
+	 *                     lists; incremented if the lists were not full
+	 * @param maxNbrs      maximum number of closest neighbours to be returned
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error: {@link ILfs#ERROR_CODE_480} insertion point exceeds
+	 *         lists, {@link ILfs#ERROR_CODE_481} overflow in neighbour lists
+	 */
 	public int insertNeighbor(final int nbrListPos, final int nbrIndex, final double nbrDist2,
 			AtomicIntegerArray oNbrList, AtomicReferenceArray<Double> oNbrSqrDists, AtomicInteger oNoOfNbrs,
 			final int maxNbrs) {
@@ -436,17 +577,21 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortNeighbors - Takes a list of primary minutia and its neighboring
-	 * #cat: minutia indices and sorts the neighbors based on their #cat: position
-	 * relative to the primary minutia point. Neighbors #cat: are sorted starting
-	 * vertical to the primary point and #cat: proceeding clockwise. Input: oNbrList
-	 * - list of neighboring minutia indices noOfNbrs - number of neighbors in the
-	 * list firstMinutiaIndex - the index of the primary minutia point oMinutiae -
-	 * list of oMinutiae Output: oNbrList - neighboring minutia indices in sorted
-	 * order Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a primary minutia and its neighbouring minutia indices and sorts the
+	 * neighbours based on their position relative to the primary minutia point.
+	 * <p>
+	 * NIST: {@code sort_neighbors()}. Neighbours are sorted starting vertical to
+	 * the primary point and proceeding clockwise.
+	 *
+	 * @param oNbrList          input/output: list of neighbouring minutia
+	 *                          indices; on return in sorted order
+	 * @param noOfNbrs          number of neighbours in the list
+	 * @param firstMinutiaIndex the index of the primary minutia point
+	 * @param oMinutiae         list of minutiae
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int sortNeighbors(AtomicIntegerArray oNbrList, final int noOfNbrs, final int firstMinutiaIndex,
 			AtomicReference<Minutiae> oMinutiae) {
 		AtomicReferenceArray<Double> joinThetas;
@@ -460,8 +605,9 @@ public class Ridges extends MindTct implements IRidges {
 			/* Coordinates are swapped and order of points reversed to */
 			/* account for 0 direction is vertical and positive direction */
 			/* is clockwise. */
-			theta = getLfsUtil().angleToLine(oMinutiae.get().getList().get(minutiaIndex).getY(),
-					oMinutiae.get().getList().get(minutiaIndex).getX(),
+			int nbrIndex = oNbrList.get(minutiaIndex);
+			theta = getLfsUtil().angleToLine(oMinutiae.get().getList().get(nbrIndex).getY(),
+					oMinutiae.get().getList().get(nbrIndex).getX(),
 					oMinutiae.get().getList().get(firstMinutiaIndex).getY(),
 					oMinutiae.get().getList().get(firstMinutiaIndex).getX());
 
@@ -481,17 +627,25 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: ridgeCount - Takes a pair of oMinutiae, and counts the number of #cat:
-	 * ridges crossed along the linear trajectory connecting #cat: the 2 points in
-	 * the image. Input: firstMinutiaIndex - index of primary minutia
-	 * secondMinutiaIndex - index of secondary (neighbor) minutia oMinutiae - list
-	 * of oMinutiae binarizedImageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image lfsParams - parameters and thresholds for controlling LFS Return Code:
-	 * Zero or Positive - number of ridges counted Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a pair of minutiae and counts the number of ridges crossed along the
+	 * linear trajectory connecting the two points in the image.
+	 * <p>
+	 * NIST: {@code ridge_count()}. After skipping to the first pixel of opposite
+	 * value, repeatedly finds a 0-to-1 (ridge start) and a 1-to-0 (ridge end)
+	 * transition and counts the pair as a ridge if
+	 * {@link #validateRidgeCrossing} confirms it (using
+	 * {@link LfsParams#getMaxRidgeSteps()}).
+	 *
+	 * @param firstMinutiaIndex  index of primary minutia
+	 * @param secondMinutiaIndex index of secondary (neighbour) minutia
+	 * @param oMinutiae          list of minutiae
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @param lfsParams          parameters and thresholds for controlling LFS
+	 * @return zero or positive: number of ridges counted; negative: system error
+	 */
 	public int ridgeCount(final int firstMinutiaIndex, final int secondMinutiaIndex,
 			AtomicReference<Minutiae> oMinutiae, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			final LfsParams lfsParams) {
@@ -562,7 +716,7 @@ public class Ridges extends MindTct implements IRidges {
 		ridgeCount = 0;
 
 		if (isShowLogs())
-			logger.info(MessageFormat.format("RIDGE COUNT: {0},{1} to {2},{3} ", firstMinutia.getX(), firstMinutia.getY(),
+			logger.debug(MessageFormat.format("RIDGE COUNT: {0},{1} to {2},{3} ", firstMinutia.getX(), firstMinutia.getY(),
 					secondMinutia.getX(), secondMinutia.getY()));
 
 		/* While not at the end of the trajectory ... */
@@ -575,7 +729,7 @@ public class Ridges extends MindTct implements IRidges {
 				getFree().free(ylist);
 
 				if (isShowLogs())
-					logger.info("\n");
+					logger.debug("\n");
 
 				/* Return number of ridges counted to this point. */
 				return (ridgeCount);
@@ -585,7 +739,7 @@ public class Ridges extends MindTct implements IRidges {
 			ridgeStart = i.get();
 
 			if (isShowLogs())
-				logger.info(": RS {0},{1} ", xlist[i.get()], ylist[i.get()]);
+				logger.debug(": RS {0},{1} ", xlist[i.get()], ylist[i.get()]);
 
 			/* If 1-to-0 transition not found ... */
 			if (findTransition(i, 1, 0, xlist, ylist, num.get(), binarizedImageData, imageWidth,
@@ -595,7 +749,7 @@ public class Ridges extends MindTct implements IRidges {
 				getFree().free(ylist);
 
 				if (isShowLogs())
-					logger.info("\n");
+					logger.debug("\n");
 
 				/* Return number of ridges counted to this point. */
 				return (ridgeCount);
@@ -605,7 +759,7 @@ public class Ridges extends MindTct implements IRidges {
 			ridgeEnd = i.get();
 
 			if (isShowLogs())
-				logger.info("; RE {0},{1} ", xlist[i.get()], ylist[i.get()]);
+				logger.debug("; RE {0},{1} ", xlist[i.get()], ylist[i.get()]);
 
 			/* Conduct the validation, tracing the contour of the ridge */
 			/* from the ridge ending point a specified number of steps */
@@ -625,7 +779,7 @@ public class Ridges extends MindTct implements IRidges {
 			}
 
 			if (isShowLogs())
-				logger.info("; V{0}", ret);
+				logger.debug("; V{0}", ret);
 
 			/* If validation result is TRUE ... */
 			if (ret != ILfs.FALSE) {
@@ -643,27 +797,35 @@ public class Ridges extends MindTct implements IRidges {
 		getFree().free(ylist);
 
 		if (isShowLogs())
-			logger.info(" ");
+			logger.debug(" ");
 
 		/* Return the number of ridges counted. */
 		return (ridgeCount);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: findTransition - Takes a pixel trajectory and a starting index, and
-	 * #cat: searches forward along the trajectory until the specified #cat:
-	 * adjacent pixel pair is found, returning the index where #cat: the pair was
-	 * found (the index of the second pixel). Input: startPixel - pointer to
-	 * starting pixel index into trajectory firstPixel - first pixel value in
-	 * transition pair secondPixel - second pixel value in transition pair xlist -
-	 * x-pixel coords of line trajectory ylist - y-pixel coords of line trajectory
-	 * num - number of coords in line trajectory binarizedImageData - binary image
-	 * data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image Output: iptr - points to location
-	 * where 2nd pixel in pair is found Return Code: TRUE - pixel pair transition
-	 * found FALSE - pixel pair transition not found
-	 **************************************************************************/
+	/**
+	 * Takes a pixel trajectory and a starting index, and searches forward along
+	 * the trajectory until the specified adjacent pixel pair is found.
+	 * <p>
+	 * NIST: {@code find_trans()}. On success the position is set to the index of
+	 * the second pixel in the pair; otherwise it is set to {@code num} (the end
+	 * of the trajectory).
+	 *
+	 * @param startPixel         input/output: starting pixel index into the
+	 *                           trajectory; on return the location where the
+	 *                           second pixel in the pair is found (or
+	 *                           {@code num})
+	 * @param firstPixel         first pixel value in transition pair
+	 * @param secondPixel        second pixel value in transition pair
+	 * @param xlist              x-pixel coords of line trajectory
+	 * @param ylist              y-pixel coords of line trajectory
+	 * @param num                number of coords in line trajectory
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @return {@link ILfs#TRUE} if the pixel pair transition was found;
+	 *         {@link ILfs#FALSE} if it was not found
+	 */
 	public int findTransition(AtomicInteger startPixel, final int firstPixel, final int secondPixel, final int[] xlist,
 			final int[] ylist, final int num, int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		int i, j;
@@ -698,22 +860,32 @@ public class Ridges extends MindTct implements IRidges {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: validateRidgeCrossing - Takes a pair of points, a ridge start #cat:
-	 * transition and a ridge end transition, and walks the #cat: ridge contour from
-	 * thre ridge end points a specified #cat: number of steps, looking for the
-	 * ridge start point. #cat: If found, then transitions determined not to be a
-	 * valid #cat: ridge crossing. Input: ridgeStart - index into line trajectory of
-	 * ridge start transition ridgeEnd - index into line trajectory of ridge end
-	 * transition xlist - x-pixel coords of line trajectory ylist - y-pixel coords
-	 * of line trajectory num - number of coords in line trajectory
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * maxRidgeSteps - number of steps taken in search in both scan directions
-	 * Return Code: TRUE - ridge crossing VALID FALSE - ridge corssing INVALID
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a ridge start transition and a ridge end transition along a line
+	 * trajectory, and walks the ridge contour from the ridge end point a
+	 * specified number of steps looking for the ridge start point.
+	 * <p>
+	 * NIST: {@code validate_ridge_crossing()}. The contour is traced both
+	 * clockwise and counter-clockwise; if the ridge start is encountered (or a
+	 * trace is ignored), the transitions are determined not to be a valid ridge
+	 * crossing (we are instead walking on and off the side of a ridge).
+	 *
+	 * @param ridgeStart         index into line trajectory of ridge start
+	 *                           transition
+	 * @param ridgeEnd           index into line trajectory of ridge end
+	 *                           transition
+	 * @param xlist              x-pixel coords of line trajectory
+	 * @param ylist              y-pixel coords of line trajectory
+	 * @param num                number of coords in line trajectory
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @param maxRidgeSteps      number of steps taken in search in both scan
+	 *                           directions
+	 * @return {@link ILfs#TRUE} if the ridge crossing is VALID;
+	 *         {@link ILfs#FALSE} if the ridge crossing is INVALID; negative on
+	 *         system error
+	 */
 	public int validateRidgeCrossing(final int ridgeStart, final int ridgeEnd, final int[] xlist, final int[] ylist,
 			final int num, int[] binarizedImageData, final int imageWidth, final int imageHeight,
 			final int maxRidgeSteps) {

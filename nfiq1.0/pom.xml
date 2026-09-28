@@ -1,18 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  MOSIP NFIQ 1.0 — Java implementation of NIST Fingerprint Image Quality 1.0
+  ============================================================================
+  Artifact : io.mosip:nfiq1.0 (plain library JAR — no Spring Boot app, no HTTP)
+  Parent   : io.mosip:nfiq (../pom.xml) → spring-boot-starter-parent.
+             Java 21 + preview, plugin versions, MOSIP/third-party versions,
+             JaCoCo 90% gate, Sonar and Maven Central publishing are inherited.
+  This POM : dependencies, coverage excludes, JAR manifest, target/lib copy,
+             sample-ISO handling.
+
+  Build    : mvn clean install "-Dgpg.skip=true"   (here, or from the repo root)
+  Run      : run-local-JP2.(bat|sh) | run-local-WSQ.(bat|sh)  [build] [0|1]  (this folder)
+  ============================================================================
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
 	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
-	<groupId>io.mosip</groupId>
-	<artifactId>nfiq1.0</artifactId>
-	<version>0.1.1-SNAPSHOT</version>
-	<name>nfiq1.0</name>
-	<description>NFIQ</description>
-	<url>https://https://github.com/mosip/nfiq</url>
 
+	<parent>
+		<groupId>io.mosip</groupId>
+		<artifactId>nfiq</artifactId>
+		<version>0.1.2-SNAPSHOT</version>
+		<relativePath>../pom.xml</relativePath>
+	</parent>
+
+	<artifactId>nfiq1.0</artifactId>
+	<!-- Same as the parent version; kept explicit because CI and release tooling read it here. -->
+	<version>0.1.2-SNAPSHOT</version>
+	<packaging>jar</packaging>
+	<name>nfiq1.0</name>
+	<description>
+		MOSIP NFIQ 1.0: a from-scratch Java implementation of the NIST Fingerprint Image
+		Quality 1.0 algorithm. Decodes JPEG2000 / WSQ fingerprints from ISO/IEC 19794-4
+		records, runs the MINDTCT minutiae detector and the NFIQ multi-layer perceptron,
+		and returns a quality score of 1 (best) to 5 (worst) plus a confidence value.
+		Consumed as a library by MOSIP Biometric SDK, ID Authentication, Registration
+		Processor and MDS.
+	</description>
+	<url>https://github.com/mosip/nfiq</url>
+
+	<!--
+		Declared again here (not only in the parent) because Maven Central validates each
+		published POM, and inherited url/scm values would otherwise get "/nfiq1.0" appended.
+	-->
 	<licenses>
 		<license>
 			<name>MPL 2.0</name>
 			<url>https://www.mozilla.org/en-US/MPL/2.0/</url>
+			<distribution>repo</distribution>
 		</license>
 	</licenses>
 
@@ -25,241 +62,146 @@
 
 	<developers>
 		<developer>
-			<name>Mosip</name>
+			<name>MOSIP</name>
 			<email>mosip.emailnotifier@gmail.com</email>
 			<organization>io.mosip</organization>
 			<organizationUrl>https://github.com/mosip/nfiq</organizationUrl>
 		</developer>
 	</developers>
 
-	<properties>
-		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<java.version>21</java.version>
-
-		<!-- maven -->
-		<maven.compiler.source>${java.version}</maven.compiler.source>
-		<maven.compiler.target>${java.version}</maven.compiler.target>
-		<maven.compiler.version>3.11.0</maven.compiler.version>
-		<maven.jar.plugin.version>3.0.2</maven.jar.plugin.version>
-		<maven.war.plugin.version>3.1.0</maven.war.plugin.version>
-		<maven.javadoc.plugin.version>3.2.0</maven.javadoc.plugin.version>
-		<maven.shade.plugin.version>2.3</maven.shade.plugin.version>
-		<jacoco.maven.plugin.version>0.8.11</jacoco.maven.plugin.version>
-		<maven.deploy.plugin.version>3.1.1</maven.deploy.plugin.version>
-		<maven.source.plugin.version>3.3.1</maven.source.plugin.version>
-		<maven.javadoc.plugin.version>3.2.0</maven.javadoc.plugin.version>
-		<maven.jar.plugin.version>3.0.2</maven.jar.plugin.version>
-		<maven.war.plugin.version>3.1.0</maven.war.plugin.version>
-		<maven.surefire.plugin.version>2.22.0</maven.surefire.plugin.version>
-		<maven.dependency.plugin.version>3.1.2</maven.dependency.plugin.version>
-		<maven.resources.plugin.version>3.0.1</maven.resources.plugin.version>
-		<maven.sonar.plugin.version>3.7.0.1746</maven.sonar.plugin.version>
-
-		<central.publishing.maven.plugin.version>0.7.0</central.publishing.maven.plugin.version>
-		<spring.boot.maven.plugin.version>3.2.5</spring.boot.maven.plugin.version>
-
-		<!-- git -->
-		<git.commit.id.plugin.version>3.0.1</git.commit.id.plugin.version>
-
-		<!-- utilities -->
-		<imgscalr.lib.version>4.2</imgscalr.lib.version>
-		<jai.imageio.jpeg2000.version>1.3.0</jai.imageio.jpeg2000.version>
-		<github.mhshams.jnbis.version>2.0.2</github.mhshams.jnbis.version>
-
-		<!-- Mosip kernel -->
-		<kernel.bom.version>1.3.1-rc.1</kernel.bom.version>
-		<kernel.core.version>1.3.1-rc.1</kernel.core.version>
-		<mosip.biometrics.util.version>1.3.1</mosip.biometrics.util.version>
-
-        <!-- Testing -->
-        <mockito.junit.jupiter.version>4.11.0</mockito.junit.jupiter.version>
-        <mockito.inline.version>4.11.0</mockito.inline.version>
-        <junit.jupiter.version>5.10.2</junit.jupiter.version>
-
-        <!-- Sonar -->
-        <sonar.coverage.exclusions>**/common/**,**/Defs.java,**/Nfiq1.java,**/Nfiq1Globals.java,**/Nist.java</sonar.coverage.exclusions>
-	</properties>
-
-	<dependencyManagement>
-		<dependencies>
-			<dependency>
-				<groupId>io.mosip.kernel</groupId>
-				<artifactId>kernel-bom</artifactId>
-				<version>${kernel.bom.version}</version>
-				<type>pom</type>
-				<scope>import</scope>
-			</dependency>
-		</dependencies>
-	</dependencyManagement>
-
 	<dependencies>
+		<!-- ── MOSIP ─────────────────────────────────────────────────────────── -->
+		<!-- Decodes ISO fingerprint records to raw greyscale pixels before scoring. -->
+		<dependency>
+			<groupId>io.mosip.biometric.util</groupId>
+			<artifactId>biometrics-util</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>io.mosip.kernel</groupId>
+					<artifactId>kernel-core</artifactId>
+				</exclusion>			</exclusions>
+		</dependency>
 		<!--
-		https://mvnrepository.com/artifact/com.github.jai-imageio/jai-imageio-jpeg2000 -->
+			biometrics-util needs kernel-core classes (e.g. BaseUncheckedException) at runtime, but
+			none of kernel-core's transitive graph. That graph carries licenses MOSIP does not allow
+			(EPL/LGPL/GPL-CE/CC-BY: Logback, AspectJ, jakarta.transaction/annotation, mchange,
+			openhtmltopdf, findbugs annotations, jcip) plus banned JUnit 4 / vintage, so it is cut.
+		-->
+		<dependency>
+			<groupId>io.mosip.kernel</groupId>
+			<artifactId>kernel-core</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>*</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+
+		<!-- ── Image codecs (versions managed in the parent) ─────────────────── -->
+		<!-- jai-imageio-jpeg2000: JPEG2000 (JP2/J2K) reader for ISO payloads. -->
 		<dependency>
 			<groupId>com.github.jai-imageio</groupId>
 			<artifactId>jai-imageio-jpeg2000</artifactId>
-			<version>${jai.imageio.jpeg2000.version}</version>
 		</dependency>
+		<!-- jnbis: WSQ fingerprint codec. -->
 		<dependency>
-			<groupId>org.apache.commons</groupId>
-			<artifactId>commons-lang3</artifactId>
+			<groupId>com.github.mhshams</groupId>
+			<artifactId>jnbis</artifactId>
 		</dependency>
+
+		<!-- ── Logging ───────────────────────────────────────────────────────── -->
+		<!--
+			slf4j-api: logging facade used by every class. Version from Boot parent. License: MIT.
+			No binding is shipped on purpose: the consuming MOSIP service supplies its own backend.
+			Tests and the launchers get Logback from spring-boot-starter-test (test scope only).
+			Local/test config: src/test/resources/logback-test.xml.
+		-->
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-api</artifactId>
 		</dependency>
-		<dependency>
-			<groupId>org.slf4j</groupId>
-			<artifactId>slf4j-log4j12</artifactId>
-		</dependency>
-		<!-- https://mvnrepository.com/artifact/com.github.mhshams/jnbis -->
-		<dependency>
-			<groupId>com.github.mhshams</groupId>
-			<artifactId>jnbis</artifactId>
-			<version>${github.mhshams.jnbis.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.mosip.biometric.util</groupId>
-			<artifactId>biometrics-util</artifactId>
-			<version>${mosip.biometrics.util.version}</version>
-		</dependency>
+
+		<!-- ── Compile-time only ─────────────────────────────────────────────── -->
+		<!-- lombok: @Data/@Getter/@Setter code generation. Scope provided. License: MIT. -->
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
 			<scope>provided</scope>
 		</dependency>
-		<!-- Test Dependencies -->
+
+		<!-- ── Test ──────────────────────────────────────────────────────────── -->
+		<!--
+			spring-boot-starter-test: JUnit Jupiter, Mockito (inline mock maker is the
+			default since Mockito 5, so mockito-inline is no longer needed), AssertJ and
+			spring-test (ReflectionTestUtils). Version from Boot parent. Scope: test.
+		-->
 		<dependency>
-			<groupId>org.junit.jupiter</groupId>
-			<artifactId>junit-jupiter</artifactId>
-			<version>${junit.jupiter.version}</version>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.mockito</groupId>
-			<artifactId>mockito-inline</artifactId>
-			<version>${mockito.inline.version}</version>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.mockito</groupId>
-			<artifactId>mockito-junit-jupiter</artifactId>
-			<version>${mockito.junit.jupiter.version}</version>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
 
-	<distributionManagement>
-		<snapshotRepository>
-			<id>ossrh</id>
-			<url>https://central.sonatype.com/repository/maven-snapshots/</url>
-		</snapshotRepository>
-		<repository>
-			<id>ossrh</id>
-			<url>https://central.sonatype.com/api/v1/publisher</url>
-		</repository>
-	</distributionManagement>
 	<build>
+		<!--
+			Sample fingerprints (src/test/resources/info_*.iso) are read in place by tests and the
+			run-local-* launchers, so they are never copied into target/.
+		-->
+		<testResources>
+			<testResource>
+				<directory>src/test/resources</directory>
+				<excludes>
+					<exclude>**/*.iso</exclude>
+				</excludes>
+			</testResource>
+		</testResources>
 		<plugins>
+			<!-- Coverage excludes: keep in sync with sonar.coverage.exclusions in the parent. -->
 			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-compiler-plugin</artifactId>
-				<version>${maven.compiler.version}</version>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
 				<configuration>
-					<release>${java.version}</release>
-					<compilerArgs>
-						<arg>--enable-preview</arg>
-					</compilerArgs>
-				</configuration>
-			</plugin>
-			<plugin>
-				<artifactId>maven-deploy-plugin</artifactId>
-				<version>${maven.deploy.plugin.version}</version>
-				<configuration>
-					<skip>false</skip>
-				</configuration>
-				<executions>
-					<execution>
-						<id>default-deploy</id>
-						<phase>deploy</phase>
-						<goals>
-							<goal>deploy</goal>
-						</goals>
-						<configuration>
-							<skip>false</skip>
-						</configuration>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-source-plugin</artifactId>
-				<version>${maven.source.plugin.version}</version>
-				<executions>
-					<execution>
-						<id>attach-sources</id>
-						<goals>
-							<goal>jar-no-fork</goal>
-						</goals>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-javadoc-plugin</artifactId>
-				<version>${maven.javadoc.plugin.version}</version>
-				<executions>
-					<execution>
-						<id>attach-javadocs</id>
-						<goals>
-							<goal>jar</goal>
-						</goals>
-					</execution>
-				</executions>
-				<configuration>
-					<doclint>none</doclint>
+					<excludes>
+						<exclude>**/common/**</exclude>
+						<exclude>**/nfiq1/Defs.class</exclude>
+						<exclude>**/nfiq1/Nfiq1.class</exclude>
+						<exclude>**/nfiq1/Nfiq1Globals.class</exclude>
+						<exclude>**/nfiq1/Nist.class</exclude>
+					</excludes>
 				</configuration>
 			</plugin>
 
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-gpg-plugin</artifactId>
-				<version>1.5</version>
-				<executions>
-					<execution>
-						<id>sign-artifacts</id>
-						<phase>verify</phase>
-						<goals>
-							<goal>sign</goal>
-						</goals>
-						<configuration>
-							<gpgArguments>
-								<arg>--pinentry-mode</arg>
-								<arg>loopback</arg>
-							</gpgArguments>
-						</configuration>
-					</execution>
-				</executions>
-			</plugin>
-
+			<!--
+				Library JAR. Main-Class points at the sample harness in test-classes so
+				`java -cp nfiq1.0-*.jar;lib/*;test-classes` works (see run-local-JP2 / run-local-WSQ).
+			-->
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
-				<version>${maven.jar.plugin.version}</version>
 				<configuration>
 					<archive>
 						<manifest>
 							<addClasspath>true</addClasspath>
+							<addDefaultImplementationEntries>true</addDefaultImplementationEntries>
 							<mainClass>org.mosip.nist.nfiq1.test.NfiqApplication</mainClass>
 						</manifest>
+						<manifestEntries>
+							<Project-Name>${project.name}</Project-Name>
+							<Project-Version>${project.version}</Project-Version>
+							<Implementation-Vendor>MOSIP</Implementation-Vendor>
+						</manifestEntries>
 					</archive>
 				</configuration>
 			</plugin>
 
+			<!--
+				Copies jars to target/lib for the sample harness classpath. Test scope so the
+				Logback backend (test-only here) is present when the launchers run NfiqApplication.
+			-->
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-dependency-plugin</artifactId>
-				<version>${maven.dependency.plugin.version}</version>
 				<executions>
 					<execution>
 						<id>copy</id>
@@ -268,9 +210,8 @@
 							<goal>copy-dependencies</goal>
 						</goals>
 						<configuration>
-							<outputDirectory>
-								${project.build.directory}/lib
-							</outputDirectory>
+							<outputDirectory>${project.build.directory}/lib</outputDirectory>
+							<includeScope>test</includeScope>
 							<overWriteReleases>false</overWriteReleases>
 							<overWriteSnapshots>false</overWriteSnapshots>
 							<overWriteIfNewer>true</overWriteIfNewer>
@@ -278,136 +219,6 @@
 					</execution>
 				</executions>
 			</plugin>
-
-			<plugin>
-				<artifactId>maven-resources-plugin</artifactId>
-				<version>${maven.resources.plugin.version}</version>
-				<executions>
-					<execution>
-						<id>copy-resources-1</id>
-						<!-- here the phase you need -->
-						<phase>validate</phase>
-						<goals>
-							<goal>copy-resources</goal>
-						</goals>
-						<configuration>
-							<outputDirectory>${basedir}/target</outputDirectory>
-							<resources>
-								<resource>
-									<directory>${basedir}</directory> //<filtering>
-									false</filtering>
-									<includes><!-- what -->
-										<include>info_jp2.iso</include>
-										<include>info_wsq.iso</include>
-										<include>runJP2.bat</include>
-										<include>runWSQ.bat</include>
-									</includes>
-								</resource>
-							</resources>
-						</configuration>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-surefire-plugin</artifactId>
-				<version>${maven.surefire.plugin.version}</version>
-				<configuration>
-					<skipTests>${skipTests}</skipTests>
-					<skip>false</skip>
-					<argLine>
-						${argLine}
-						--enable-preview
-					</argLine>
-				</configuration>
-			</plugin>
-			<plugin>
-				<groupId>org.jacoco</groupId>
-				<artifactId>jacoco-maven-plugin</artifactId>
-				<version>${jacoco.maven.plugin.version}</version>
-				<executions>
-					<execution>
-						<goals>
-							<goal>prepare-agent</goal>
-						</goals>
-					</execution>
-					<execution>
-						<id>report</id>
-						<phase>prepare-package</phase>
-						<goals>
-							<goal>report</goal>
-						</goals>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.sonatype.central</groupId>
-				<artifactId>central-publishing-maven-plugin</artifactId>
-				<version>${central.publishing.maven.plugin.version}</version>
-				<extensions>true</extensions>
-				<configuration>
-					<publishingServerId>ossrh</publishingServerId>
-					<autoPublish>false</autoPublish>
-				</configuration>
-			</plugin>
-			<plugin>
-				<groupId>pl.project13.maven</groupId>
-				<artifactId>git-commit-id-plugin</artifactId>
-				<version>${git.commit.id.plugin.version}</version>
-				<executions>
-					<execution>
-						<id>get-the-git-infos</id>
-						<goals>
-							<goal>revision</goal>
-						</goals>
-						<phase>validate</phase>
-					</execution>
-				</executions>
-				<configuration>
-					<generateGitPropertiesFile>true</generateGitPropertiesFile>
-					<generateGitPropertiesFilename>
-						${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
-					<includeOnlyProperties>
-						<includeOnlyProperty>^git.build.(time|version)$</includeOnlyProperty>
-						<includeOnlyProperty>^git.commit.id.(abbrev|full)$</includeOnlyProperty>
-					</includeOnlyProperties>
-					<commitIdGenerationMode>full</commitIdGenerationMode>
-					<dotGitDirectory>${project.basedir}/.git</dotGitDirectory>
-				</configuration>
-			</plugin>
 		</plugins>
 	</build>
-
-	<profiles>
-		<profile>
-			<id>sonar</id>
-			<properties>
-				<sonar.sources>.</sonar.sources>
-				<sonar.inclusions>src/main/java/**,src/main/resources/**</sonar.inclusions>
-				<sonar.exclusions>${sonar.coverage.exclusions}</sonar.exclusions>
-				<sonar.host.url>https://sonarcloud.io</sonar.host.url>
-			</properties>
-			<activation>
-				<activeByDefault>false</activeByDefault>
-			</activation>
-			<build>
-				<plugins>
-					<plugin>
-						<groupId>org.sonarsource.scanner.maven</groupId>
-						<artifactId>sonar-maven-plugin</artifactId>
-						<version>${maven.sonar.plugin.version}</version>
-						<executions>
-							<execution>
-								<phase>verify</phase>
-								<goals>
-									<goal>sonar</goal>
-								</goals>
-							</execution>
-						</executions>
-					</plugin>
-				</plugins>
-			</build>
-		</profile>
-	</profiles>
-
 </project>

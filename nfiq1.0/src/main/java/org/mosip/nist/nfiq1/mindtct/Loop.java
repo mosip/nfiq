@@ -13,14 +13,62 @@ import org.mosip.nist.nfiq1.common.ILfs.Shape;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Loop, island and lake detection and removal for the MINDTCT minutiae detector.
+ *
+ * This class is the Java port of NIST's {@code loop.c} from the LFS (Latent Fingerprint System)
+ * library used by MINDTCT / NFIQ 1.0. A "loop" is a closed contour in the binarized fingerprint
+ * image: either an <i>island</i> (a small closed black ridge fragment) or a <i>lake</i> (a small
+ * closed white valley enclosed by ridge). Such features are usually noise and generate spurious
+ * minutia pairs. The routines here:
+ * <ul>
+ * <li>test whether a minutia (or a pair of minutiae) lies on a loop or on a hook,</li>
+ * <li>determine the orientation (clockwise or counter-clockwise) of a traced contour,</li>
+ * <li>measure a loop's aspect (narrowest and widest cross distances), and</li>
+ * <li>either convert a large, elongated loop into two candidate minutiae, or fill (erase) the loop
+ * in the binary image so that it no longer produces false minutiae.</li>
+ * </ul>
+ * Contour tracing itself is delegated to {@link Contour}, chain coding to {@link ChainCode}, and
+ * minutia bookkeeping to {@link MinutiaHelper}.
+ *
+ * Pixel coordinates are zero-based with {@code x} increasing to the right and {@code y}
+ * increasing downwards; image buffers are row-major ({@code index = y * imageWidth + x}).
+ * Return codes follow the NIST convention: {@link ILfs#FALSE} ({@code 0}) means success or "not
+ * found", positive codes such as {@link ILfs#LOOP_FOUND}, {@link ILfs#HOOK_FOUND} or
+ * {@link ILfs#IGNORE} carry results, and negative values are system errors.
+ *
+ * The class is a lazily created singleton obtained through {@link #getInstance()}. It holds no
+ * per-call mutable state, but the binary image and minutiae structures passed to its methods
+ * are modified in place, so callers must not share those structures across threads without
+ * external synchronization.
+ */
 public class Loop extends MindTct implements ILoop {
+	/**
+	 * SLF4J logger for this class; used to report non-fatal warnings such as an unexpected shape
+	 * encountered while filling a loop.
+	 */
 	private static final Logger logger = LoggerFactory.getLogger(Loop.class);
+	/**
+	 * Lazily created singleton instance, returned by {@link #getInstance()}; guarded by the class
+	 * monitor.
+	 */
 	private static Loop instance;
 
+	/**
+	 * Creates the singleton instance. Private to enforce the singleton pattern; use
+	 * {@link #getInstance()} instead.
+	 */
 	private Loop() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * The method is {@code synchronized}, so initialization is thread-safe.
+	 *
+	 * @return the singleton {@code Loop} instance, never {@code null}
+	 */
 	public static synchronized Loop getInstance() {
 		if (instance == null) {
 			instance = new Loop();
@@ -28,46 +76,94 @@ public class Loop extends MindTct implements ILoop {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Shapes} helper (NIST {@code shape.c}) used to convert a loop contour
+	 * into row-wise shape spans for filling.
+	 *
+	 * @return the {@link Shapes} singleton
+	 */
 	public Shapes getShapes() {
 		return Shapes.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link ChainCode} helper (NIST {@code chaincod.c}) used to derive and
+	 * analyze Freeman chain codes of contours.
+	 *
+	 * @return the {@link ChainCode} singleton
+	 */
 	public ChainCode getChainCode() {
 		return ChainCode.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper, the Java counterpart of NIST's {@code free.c}
+	 * deallocation routines (largely no-ops under garbage collection, kept for parity with the C
+	 * source).
+	 *
+	 * @return the {@link Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link MinutiaHelper} (NIST {@code minutia.c}) used to create, classify,
+	 * add and remove minutiae.
+	 *
+	 * @return the {@link MinutiaHelper} singleton
+	 */
 	public MinutiaHelper getMinutiaHelper() {
 		return MinutiaHelper.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Contour} helper (NIST {@code contour.c}) used to trace feature
+	 * contours in the binary image.
+	 *
+	 * @return the {@link Contour} singleton
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link LfsUtil} helper (NIST {@code util.c}) providing geometric utilities
+	 * such as squared distance and line-to-direction conversion.
+	 *
+	 * @return the {@link LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getLoopList - Takes a list of minutia points and determines which #cat:
-	 * ones lie on loops around valleys (lakes) of a specified #cat: maximum
-	 * circumference. The routine returns a list of #cat: flags, one for each
-	 * minutia in the input list, and if #cat: the minutia is on a qualifying loop,
-	 * the corresponding #cat: flag is set to TRUE, otherwise it is set to FALSE.
-	 * #cat: If for some reason it was not possible to trace the #cat: minutia's
-	 * contour, then it is removed from the list. #cat: This can occur due to edits
-	 * dynamically taking place #cat: in the image by other routines. Input:
-	 * oMinutiae - list of true and false oMinutiae loopLen - maximum size of loop
-	 * searched for binarizedImageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image Output: onloop - loop flags: TRUE == loop, FALSE == no loop Return
-	 * Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Flags which minutiae in a list lie on loops of a specified maximum circumference.
+	 *
+	 * Port of NIST {@code get_loop_list()}. Every minutia in the list is examined in order:
+	 * <ul>
+	 * <li>Ridge endings can never lie on a loop, so their flag is set to {@link ILfs#FALSE}.</li>
+	 * <li>Bifurcations are tested with {@link #onLoop}. If the minutia lies on a qualifying loop
+	 * (a lake around a valley), its flag is set to {@link ILfs#TRUE}; if not, {@link ILfs#FALSE}.</li>
+	 * <li>If the minutia's contour could not be traced ({@link ILfs#IGNORE}), which can happen
+	 * because other routines edit the image dynamically, the minutia is removed from the list and
+	 * the next minutia slides into its position.</li>
+	 * </ul>
+	 * Because minutiae may be removed, the flag at index {@code i} of {@code onloop} corresponds to
+	 * the minutia at index {@code i} of the list <i>after</i> this call returns.
+	 *
+	 * @param onloop             output array of loop flags, one per minutia; must be pre-allocated by
+	 *                           the caller with at least as many entries as there are minutiae. Each
+	 *                           entry is set to {@link ILfs#TRUE} (on a loop) or {@link ILfs#FALSE}
+	 * @param oMinutiae          reference to the list of true and false minutiae; minutiae whose
+	 *                           contour cannot be traced are removed from this list in place
+	 * @param loopLen            maximum length (number of contour steps) of loop searched for
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black)
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @return {@link ILfs#FALSE} ({@code 0}) on successful completion; a negative system error code
+	 *         propagated from {@link #onLoop} or from minutia removal otherwise
+	 */
 	public int getLoopList(AtomicIntegerArray onloop, AtomicReference<Minutiae> oMinutiae, final int loopLen,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		int i;
@@ -129,17 +225,25 @@ public class Loop extends MindTct implements ILoop {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: onLoop - Determines if a minutia point lies on a loop (island or lake)
-	 * #cat: of specified maximum circumference. Input: minutia - list of true and
-	 * false minutia maxLoopLen - maximum size of loop searched for
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image Return
-	 * Code: IGNORE - minutia contour could not be traced LOOP_FOUND - minutia
-	 * determined to lie on qualifying loop FALSE - minutia determined not to lie on
-	 * qualifying loop Negative - system error
-	 **************************************************************************/
+	/**
+	 * Determines whether a minutia point lies on a loop (island or lake) of a specified maximum
+	 * circumference.
+	 *
+	 * Port of NIST {@code on_loop()}. The contour of the feature is traced clockwise starting at the
+	 * minutia point (using the minutia's edge pixel as the starting neighbor) for up to
+	 * {@code maxLoopLen} steps. If the trace returns to the starting point within that many steps,
+	 * the minutia lies on a qualifying loop.
+	 *
+	 * @param minutia            the minutia to test; its {@code x}/{@code y} and edge
+	 *                           {@code ex}/{@code ey} pixel coordinates are used as trace start
+	 * @param maxLoopLen         maximum number of contour steps (maximum loop circumference) to trace
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black)
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @return {@link ILfs#LOOP_FOUND} ({@code 1}) if the minutia lies on a qualifying loop;
+	 *         {@link ILfs#FALSE} ({@code 0}) if it does not; {@link ILfs#IGNORE} ({@code 2}) if the
+	 *         minutia's contour could not be traced; a negative system error code otherwise
+	 */
 	public int onLoop(final Minutia minutia, final int maxLoopLen, int[] binarizedImageData, final int imageWidth,
 			final int imageHeight) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -174,23 +278,35 @@ public class Loop extends MindTct implements ILoop {
 		return (ret.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: onIslandLake - Determines if two minutia points lie on the same loop
-	 * #cat: (island or lake). If a loop is detected, the contour #cat: points of
-	 * the loop are returned. Input: firstMinutia - first minutia point
-	 * secondMinutia - second minutia point maxHalfLoop - maximum size of half the
-	 * loop circumference searched for binarizedImageData - binary image data
-	 * (0==while & 1==black) imageWidth - width (in pixels) of image imageHeight -
-	 * height (in pixels) of image Output: ret - IGNORE - contour could not be
-	 * traced - LOOP_FOUND - oMinutiae determined to lie on same qualifying loop -
-	 * FALSE - oMinutiae determined not to lie on same qualifying loop - Negative -
-	 * system error oncontour - number of points in the contour. Return Code:
-	 * Contour -- contians below information ocontourX - x-pixel coords of loop
-	 * contour ocontourY - y-pixel coords of loop contour ocontourX - x coord of
-	 * each contour point's edge pixel ocontourY - y coord of each contour point's
-	 * edge pixel
-	 **************************************************************************/
+	/**
+	 * Determines whether two minutia points lie on the same loop (island or lake) and, if so,
+	 * returns the loop's contour.
+	 *
+	 * Port of NIST {@code on_island_lake()}. The contour is first traced clockwise from the first
+	 * minutia for up to {@code maxHalfLoop} steps, stopping if the second minutia is reached. If it
+	 * is, a second clockwise trace is run from the second minutia back towards the first. When both
+	 * half traces succeed, the two halves are joined into one full loop contour of
+	 * {@code nContour1 + nContour2 + 2} points, stored in this order: first minutia, first half
+	 * contour, second minutia, second half contour.
+	 *
+	 * @param ret                output result code, set to one of: {@link ILfs#LOOP_FOUND} if the
+	 *                           minutiae lie on the same qualifying loop; {@link ILfs#FALSE} if they
+	 *                           do not; {@link ILfs#IGNORE} if a contour could not be traced; a
+	 *                           negative system error code on failure
+	 * @param oncontour          output number of points in the returned loop contour (set only when
+	 *                           a loop is found)
+	 * @param firstMinutia       first minutia point
+	 * @param secondMinutia      second minutia point
+	 * @param maxHalfLoop        maximum number of contour steps for each half of the loop (half the
+	 *                           loop circumference searched for)
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black)
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @return the full loop {@link Contour} when {@code ret} is {@link ILfs#LOOP_FOUND}, holding the
+	 *         x/y pixel coordinates of each contour point ({@code contourX}/{@code contourY}) and of
+	 *         each point's edge pixel ({@code contourEx}/{@code contourEy}); otherwise
+	 *         {@code null} (or an unusable contour if loop contour allocation failed)
+	 */
 	public Contour onIslandLake(AtomicInteger ret, AtomicInteger oncontour, Minutia firstMinutia, Minutia secondMinutia,
 			final int maxHalfLoop, int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		int i;
@@ -313,17 +429,25 @@ public class Loop extends MindTct implements ILoop {
 		return contourLoop;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: onHook - Determines if two minutia points lie on a hook on the side
-	 * #cat: of a ridge or valley. Input: firstMinutia - first minutia point
-	 * secondMinutia - second minutia point maxHookLen - maximum length of contour
-	 * searched along for a hook binarizedImageData - binary image data (0==while &
-	 * 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image Return Code: IGNORE - contour could not be traced HOOK_FOUND
-	 * - oMinutiae determined to lie on same qualifying hook FALSE - oMinutiae
-	 * determined not to lie on same qualifying hook Negative - system error
-	 **************************************************************************/
+	/**
+	 * Determines whether two minutia points lie on a hook on the side of a ridge or valley.
+	 *
+	 * Port of NIST {@code on_hook()}. This routine should only be called when the two minutiae are
+	 * of "opposite" type. The contour is traced starting from the first minutia's edge pixel for up
+	 * to {@code maxHookLen} steps, first searching edge neighbors clockwise and, if the second
+	 * minutia was not reached, again counter-clockwise. Reaching the second minutia in either
+	 * direction means both lie on the same hook.
+	 *
+	 * @param firstMinutia       first minutia point (trace starts at its edge pixel)
+	 * @param secondMinutia      second minutia point (trace target)
+	 * @param maxHookLen         maximum length (number of contour steps) searched along for a hook
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black)
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @return {@link ILfs#HOOK_FOUND} ({@code 1}) if the minutiae lie on the same qualifying hook;
+	 *         {@link ILfs#FALSE} ({@code 0}) if they do not; {@link ILfs#IGNORE} ({@code 2}) if the
+	 *         contour could not be traced; a negative system error code otherwise
+	 */
 	public int onHook(Minutia firstMinutia, Minutia secondMinutia, final int maxHookLen, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -392,20 +516,23 @@ public class Loop extends MindTct implements ILoop {
 		return (ret.get());
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: isLoopClockwise - Takes a feature's contour points and determines if
-	 * #cat: the points are ordered clockwise or counter-clockwise about #cat: the
-	 * feature. The routine also requires a default return #cat: value be specified
-	 * in the case the the routine is not able #cat: to definitively determine the
-	 * contour's order. This allows #cat: the default response to be
-	 * application-specific. Input: oContourX - x-coord list for feature's contour
-	 * points oContourY - y-coord list for feature's contour points noOfContour -
-	 * number of points in contour defaultRet - default return code (used when we
-	 * can't tell the order) Return Code: TRUE - contour determined to be ordered
-	 * clockwise FALSE - contour determined to be ordered counter-clockwise Default
-	 * - could not determine the order of the contour Negative - system error
-	 **************************************************************************/
+	/**
+	 * Determines whether a feature's contour points are ordered clockwise or counter-clockwise
+	 * about the feature.
+	 *
+	 * Port of NIST {@code is_loop_clockwise()}. A chain code is derived from the contour points and
+	 * its turning direction is analyzed with {@link ChainCode#isChainClockwise}. Because the order
+	 * cannot always be determined (for example when there are too few contour points), the caller
+	 * supplies an application-specific default result.
+	 *
+	 * @param oContourX   x-coordinates (pixels) of the feature's contour points
+	 * @param oContourY   y-coordinates (pixels) of the feature's contour points
+	 * @param noOfContour number of points in the contour
+	 * @param defaultRet  value to return when the contour order cannot be determined
+	 * @return {@link ILfs#TRUE} ({@code 1}) if the contour is ordered clockwise;
+	 *         {@link ILfs#FALSE} ({@code 0}) if counter-clockwise; {@code defaultRet} if the order
+	 *         could not be determined; a negative system error code otherwise
+	 */
 	public int isLoopClockwise(AtomicIntegerArray oContourX, AtomicIntegerArray oContourY, final int noOfContour,
 			final int defaultRet) {
 		int ret;
@@ -437,23 +564,36 @@ public class Loop extends MindTct implements ILoop {
 		return (ret);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processLoop - Takes a contour list that has been determined to form
-	 * #cat: a complete loop, and processes it. If the loop is sufficiently #cat:
-	 * large and elongated, then two minutia points are calculated #cat: along the
-	 * loop's longest aspect axis. If it is determined #cat: that the loop does not
-	 * contain oMinutiae, it is filled in the #cat: binary image. Input: oContourX -
-	 * x-coord list for loop's contour points oContourY - y-coord list for loop's
-	 * contour points oContourEx - x-coord list for loop's edge points oContourEy -
-	 * y-coord list for loop's edge points noOfContour - number of points in contour
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * lfsParams - parameters and thresholds for controlling LFS Output: oMinutiae -
-	 * points to a list of detected minutia structures OR binarizedImageData -
-	 * binary image data with loop filled Return Code: Zero - loop processed
-	 * successfully Negative - system error
-	 **************************************************************************/
+	/**
+	 * Processes a contour that has been determined to form a complete loop, either turning it into
+	 * two minutiae or erasing it from the binary image.
+	 *
+	 * Port of NIST {@code process_loop()} (version 1). If the loop is longer than
+	 * {@link LfsParams#getMinLoopLen()} and is sufficiently narrow (minimum squared cross distance
+	 * below {@link LfsParams#getMinLoopAspectDist()}) or elongated (ratio of maximum to minimum
+	 * squared cross distance at least {@link LfsParams#getMinLoopAspectRatio()}), and the midpoint
+	 * of its longest axis has the same pixel value as the feature, then the two contour points at
+	 * the ends of the longest axis (see {@link #getLoopAspect}) are each added as candidate
+	 * minutiae. The first point's direction points towards its opposite point; the second's is
+	 * flipped by 180 degrees. Both minutiae get {@link ILfs#DEFAULT_RELIABILITY} and type derived
+	 * from the feature pixel (bifurcation or ridge ending) and are tagged {@link ILfs#LOOP_ID}.
+	 * Otherwise the loop is assumed not to contain minutiae and is filled with {@link #fillLoop}.
+	 *
+	 * @param oMinutiae          reference to the list of detected minutiae; up to two new minutiae
+	 *                           derived from the loop may be added to it
+	 * @param oContourX          x-coordinates (pixels) of the loop's contour points
+	 * @param oContourY          y-coordinates (pixels) of the loop's contour points
+	 * @param oContourEx         x-coordinates (pixels) of each contour point's edge pixel
+	 * @param oContourEy         y-coordinates (pixels) of each contour point's edge pixel
+	 * @param noOfContour        number of points in the contour
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black);
+	 *                           modified in place if the loop is filled
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param lfsParams          LFS parameters and thresholds controlling loop processing
+	 * @return {@link ILfs#FALSE} ({@code 0}) if the loop was processed successfully (minutiae added
+	 *         or loop filled, or the contour was empty); a negative system error code otherwise
+	 */
 	public int processLoop(AtomicReference<Minutiae> oMinutiae, AtomicIntegerArray oContourX,
 			AtomicIntegerArray oContourY, AtomicIntegerArray oContourEx, AtomicIntegerArray oContourEy,
 			final int noOfContour, int[] binarizedImageData, final int imageWidth, final int imageHeight,
@@ -576,24 +716,33 @@ public class Loop extends MindTct implements ILoop {
 		return (ret);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: processLoopV2 - Takes a contour list that has been determined to form
-	 * #cat: a complete loop, and processes it. If the loop is sufficiently #cat:
-	 * large and elongated, then two minutia points are calculated #cat: along the
-	 * loop's longest aspect axis. If it is determined #cat: that the loop does not
-	 * contain oMinutiae, it is filled in the #cat: binary image. Input: oContourX -
-	 * x-coord list for loop's contour points oContourY - y-coord list for loop's
-	 * contour points oContourEx - x-coord list for loop's edge points oContourEy -
-	 * y-coord list for loop's edge points noOfContour - number of points in contour
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image
-	 * oLowFlowMap - pixelized Low Ridge Flow Map lfsParams - parameters and
-	 * thresholds for controlling LFS Output: oMinutiae - points to a list of
-	 * detected minutia structures OR binarizedImageData - binary image data with
-	 * loop filled Return Code: Zero - loop processed successfully Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Processes a complete loop contour (version 2), assigning minutia reliability from the Low
+	 * Ridge Flow Map.
+	 *
+	 * Port of NIST {@code process_loop_V2()}. Identical to {@link #processLoop} except that each
+	 * minutia created from the loop is given {@link ILfs#MEDIUM_RELIABILITY} when its pixel falls in
+	 * a LOW RIDGE FLOW block of {@code oLowFlowMap}, and {@link ILfs#HIGH_RELIABILITY} otherwise.
+	 * Minutiae are still added with the version-1 {@code updateMinutiae} routine, as in the NIST
+	 * source. Loops that do not qualify for minutiae are filled with {@link #fillLoop}.
+	 *
+	 * @param oMinutiae          reference to the list of detected minutiae; up to two new minutiae
+	 *                           derived from the loop may be added to it
+	 * @param oContourX          x-coordinates (pixels) of the loop's contour points
+	 * @param oContourY          y-coordinates (pixels) of the loop's contour points
+	 * @param oContourEx         x-coordinates (pixels) of each contour point's edge pixel
+	 * @param oContourEy         y-coordinates (pixels) of each contour point's edge pixel
+	 * @param noOfContour        number of points in the contour
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black);
+	 *                           modified in place if the loop is filled
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @param oLowFlowMap        pixelized Low Ridge Flow Map (one entry per image pixel,
+	 *                           {@link ILfs#TRUE} where the pixel lies in a low-flow block)
+	 * @param lfsParams          LFS parameters and thresholds controlling loop processing
+	 * @return {@link ILfs#FALSE} ({@code 0}) if the loop was processed successfully; a negative
+	 *         system error code otherwise
+	 */
 	public int processLoopV2(AtomicReference<Minutiae> oMinutiae, AtomicIntegerArray oContourX,
 			AtomicIntegerArray oContourY, AtomicIntegerArray oContourEx, AtomicIntegerArray oContourEy,
 			final int noOfContour, int[] binarizedImageData, final int imageWidth, final int imageHeight,
@@ -751,19 +900,26 @@ public class Loop extends MindTct implements ILoop {
 		return (ret);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getLoopAspect - Takes a contour list (determined to form a complete
-	 * #cat: loop) and measures the loop's aspect (the largest and smallest #cat:
-	 * distances across the loop) and returns the points on the #cat: loop where
-	 * these distances occur. Input: oContourX - x-coord list for loop's contour
-	 * points oContourY - y-coord list for loop's contour points noOfContour -
-	 * number of points in contour Output: oMinFrom - contour point index where
-	 * minimum aspect occurs oMinTo - opposite contour point index where minimum
-	 * aspect occurs oMinDist - the minimum distance across the loop oMaxFrom -
-	 * contour point index where maximum aspect occurs oMaxTo - contour point index
-	 * where maximum aspect occurs oMaxDist - the maximum distance across the loop
-	 **************************************************************************/
+	/**
+	 * Measures a loop's aspect: the smallest and largest distances across the loop, and the contour
+	 * points at which they occur.
+	 *
+	 * Port of NIST {@code get_loop_aspect()}. Pairs of opposite contour points (index {@code i} and
+	 * {@code (i + noOfContour / 2) mod noOfContour}) are compared by squared Euclidean distance.
+	 * For even-length loops only half the perimeter is walked, since the second half is exactly
+	 * redundant; for odd-length loops the entire perimeter is walked. Distances are reported in
+	 * units of squared pixels.
+	 *
+	 * @param oMinFrom    output contour index where the minimum aspect occurs
+	 * @param oMinTo      output opposite contour index where the minimum aspect occurs
+	 * @param oMinDist    output minimum (squared) distance across the loop
+	 * @param oMaxFrom    output contour index where the maximum aspect occurs
+	 * @param oMaxTo      output opposite contour index where the maximum aspect occurs
+	 * @param oMaxDist    output maximum (squared) distance across the loop
+	 * @param oContourX   x-coordinates (pixels) of the loop's contour points
+	 * @param oContourY   y-coordinates (pixels) of the loop's contour points
+	 * @param noOfContour number of points in the contour
+	 */
 	public void getLoopAspect(AtomicInteger oMinFrom, AtomicInteger oMinTo, AtomicReference<Double> oMinDist,
 			AtomicInteger oMaxFrom, AtomicInteger oMaxTo, AtomicReference<Double> oMaxDist,
 			AtomicIntegerArray oContourX, AtomicIntegerArray oContourY, final int noOfContour) {
@@ -851,21 +1007,34 @@ public class Loop extends MindTct implements ILoop {
 		oMaxDist.set(maxDistance);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: fillLoop - Takes a contour list that has been determined to form #cat:
-	 * a complete loop, and fills the loop accounting for #cat: complex/concaved
-	 * shapes. #cat: NOTE, I tried using a flood-fill in place of this routine,
-	 * #cat: but the contour (although 8-connected) is NOT guaranteed to #cat: be
-	 * "complete" surrounded (in an 8-connected sense) by pixels #cat: of opposite
-	 * color. Therefore, the flood would occasionally #cat: escape the loop and
-	 * corrupt the binary image! Input: oContourX - x-coord list for loop's contour
-	 * points oContourY - y-coord list for loop's contour points noOfContour -
-	 * number of points in contour binarizedImageData - binary image data (0==while
-	 * & 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image Output: binarizedImageData - binary image data with loop
-	 * filled Return Code: Zero - loop filled successfully Negative - system error
-	 **************************************************************************/
+	/**
+	 * Fills (erases) a complete loop in the binary image, correctly handling complex and concave
+	 * shapes.
+	 *
+	 * Port of NIST {@code fill_loop()}. The contour is converted to a row-wise shape via
+	 * {@link Shapes#shapeFromContour}; each row is then filled from the left-most to the right-most
+	 * contour point with the edge pixel value (the inverse of the feature's interior pixel value),
+	 * skipping over concavities where the next pixel already has the edge value.
+	 *
+	 * NIST note: a flood fill was tried in place of this routine, but the contour (although
+	 * 8-connected) is NOT guaranteed to be completely surrounded (in an 8-connected sense) by
+	 * pixels of opposite color, so the flood would occasionally escape the loop and corrupt the
+	 * binary image.
+	 *
+	 * If a shape row unexpectedly has no contour points, a warning is logged and the fill is
+	 * abandoned without error.
+	 *
+	 * @param oContourX          x-coordinates (pixels) of the loop's contour points
+	 * @param oContourY          y-coordinates (pixels) of the loop's contour points
+	 * @param noOfContour        number of points in the contour
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black);
+	 *                           modified in place with the loop filled
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 * @return {@link ILfs#FALSE} ({@code 0}) if the loop was filled successfully (or the fill was
+	 *         abandoned due to an unexpected shape); a negative system error code from shape
+	 *         creation otherwise
+	 */
 	public int fillLoop(AtomicIntegerArray oContourX, AtomicIntegerArray oContourY, final int noOfContour,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		Shape shape;
@@ -983,18 +1152,21 @@ public class Loop extends MindTct implements ILoop {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: fillPartialRow - Fills a specified range of contiguous pixels on #cat:
-	 * a specified row of an 8-bit pixel image with a specified #cat: pixel value.
-	 * NOTE, the pixel coordinates are assumed to #cat: be within the image
-	 * boundaries. Input: fillPixel - pixel value to fill with (should be on range
-	 * [0..255] fromX - x-pixel coord where fill should begin toX - x-pixel coord
-	 * where fill should end (inclusive) yIndex - y-pixel coord of current row being
-	 * filled binarizedImageData - 8-bit image data imageWidth - width (in pixels)
-	 * of image imageHeight - height (in pixels) of image Output: binarizedImageData
-	 * - 8-bit image data with partial row filled.
-	 **************************************************************************/
+	/**
+	 * Fills a contiguous range of pixels on one row of an 8-bit pixel image with a given value.
+	 *
+	 * Port of NIST {@code fill_partial_row()}. Pixels from {@code fromX} to {@code toX} (both
+	 * inclusive) on row {@code yIndex} are set to {@code fillPixel}. The pixel coordinates are
+	 * assumed to lie within the image boundaries; no bounds checking is performed.
+	 *
+	 * @param fillPixel          pixel value to fill with (expected on the range [0..255])
+	 * @param fromX              x-pixel coordinate where the fill begins
+	 * @param toX                x-pixel coordinate where the fill ends (inclusive)
+	 * @param yIndex             y-pixel coordinate of the row being filled
+	 * @param binarizedImageData 8-bit image data, row-major; modified in place
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels (unused, kept for parity with NIST)
+	 */
 	public void fillPartialRow(final int fillPixel, final int fromX, final int toX, final int yIndex,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		int binarizedImageDataIndex;
@@ -1012,21 +1184,27 @@ public class Loop extends MindTct implements ILoop {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: floodLoop - Fills a given contour (determined to form a complete loop)
-	 * #cat: with a specified pixel value using a recursive flood-fill #cat:
-	 * technique. #cat: NOTE, this fill approach will NOT always work with the #cat:
-	 * contours generated in this application because they #cat: are NOT guaranteed
-	 * to be ENTIRELY surrounded by 8-connected #cat: pixels not equal to the fill
-	 * pixel value. This is unfortunate #cat: because the flood-fill is a simple
-	 * algorithm that will handle #cat: complex/concaved shapes. Input: oContourX -
-	 * x-coord list for loop's contour points oContourY - y-coord list for loop's
-	 * contour points noOfContour - number of points in contour binarizedImageData -
-	 * binary image data (0==while & 1==black) imageWidth - width (in pixels) of
-	 * image imageHeight - height (in pixels) of image Output: binarizedImageData -
-	 * binary image data with loop filled
-	 **************************************************************************/
+	/**
+	 * Fills a complete loop contour with a pixel value using a recursive 4-neighbor flood fill.
+	 *
+	 * Port of NIST {@code flood_loop()}. The fill value is computed as the bitwise complement of the
+	 * feature pixel value found at the first contour point, masked to 8 bits. A flood fill is seeded
+	 * from every contour point so that interiors "pinched" off by skipped exposed corners are also
+	 * filled; simple shapes are filled from the first seed and later seeds return immediately.
+	 *
+	 * NIST note: this approach will NOT always work with the contours generated in this application
+	 * because they are not guaranteed to be ENTIRELY surrounded by 8-connected pixels not equal to
+	 * the fill value. This is unfortunate, since flood fill is a simple algorithm that handles
+	 * complex and concave shapes. {@link #fillLoop} is used instead in the main pipeline.
+	 *
+	 * @param oContourX          x-coordinates (pixels) of the loop's contour points
+	 * @param oContourY          y-coordinates (pixels) of the loop's contour points
+	 * @param noOfContour        number of points in the contour
+	 * @param binarizedImageData row-major binary image data ({@code 0} = white, {@code 1} = black);
+	 *                           modified in place with the loop filled
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 */
 	public void floodLoop(final AtomicIntegerArray oContourX, final AtomicIntegerArray oContourY, final int noOfContour,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
 		int featurePixel;
@@ -1038,7 +1216,7 @@ public class Loop extends MindTct implements ILoop {
 
 		/* Flip the feature pixel value to the value we want to */
 		/* fill with and send this value to the flood routine. */
-		fillPixel = ~featurePixel & 0xFF;
+		fillPixel = (featurePixel != 0) ? 0 : 1;
 
 		/* Flood-fill interior of contour using a 4-neighbor fill. */
 		/* We are using a 4-neighbor fill because the contour was */
@@ -1060,17 +1238,22 @@ public class Loop extends MindTct implements ILoop {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: floodFill4 - Recursively floods a region of an 8-bit pixel image with a
-	 * #cat: specified pixel value given a starting (seed) point. The #cat:
-	 * recursion is based neighbors being 4-connected. Input: fillPixel - 8-bit
-	 * pixel value to be filled with (on range [0..255] xIndex - starting x-pixel
-	 * coord yIndex - starting y-pixel coord binarizedImageData - 8-bit pixel image
-	 * data imageWidth - width (in pixels) of image imageHeight - height (in pixels)
-	 * of image Output: binarizedImageData - 8-bit pixel image data with region
-	 * filled
-	 **************************************************************************/
+	/**
+	 * Recursively floods a region of an 8-bit pixel image with a pixel value, starting from a seed
+	 * point and using 4-connected neighbors.
+	 *
+	 * Port of NIST {@code flood_fill4()}. If the seed pixel does not already hold
+	 * {@code fillPixel}, it is set and the routine recurses into its north, east, south and west
+	 * neighbors that lie within the image. Recursion depth grows with the size of the region, so
+	 * very large regions may exhaust the Java call stack.
+	 *
+	 * @param fillPixel          8-bit pixel value to fill with (on the range [0..255])
+	 * @param xIndex             starting (seed) x-pixel coordinate
+	 * @param yIndex             starting (seed) y-pixel coordinate
+	 * @param binarizedImageData 8-bit pixel image data, row-major; modified in place
+	 * @param imageWidth         width of the image, in pixels
+	 * @param imageHeight        height of the image, in pixels
+	 */
 	public void floodFill4(final int fillPixel, final int xIndex, final int yIndex, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight) {
 		int binarizedImageDataIndex;

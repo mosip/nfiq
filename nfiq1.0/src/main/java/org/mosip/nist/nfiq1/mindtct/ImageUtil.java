@@ -10,15 +10,37 @@ import org.mosip.nist.nfiq1.common.ILfs.LfsParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * General image manipulation utilities used by MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code imgutil.c}. Provides bit-depth shifting (8-bit to
+ * 6-bit and back), grayscale-to-binary thresholding, image padding, 1-pixel
+ * hole filling in binary images, free-path testing between two points and
+ * directional pixel searching. Images are stored one pixel per {@code int} in
+ * row-major order.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class ImageUtil extends MindTct implements IImageUtil {
+	/** SLF4J logger for this class. */
 	private static final Logger logger = LoggerFactory.getLogger(ImageUtil.class);
 
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static ImageUtil instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private ImageUtil() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code ImageUtil} instance
+	 */
 	public static synchronized ImageUtil getInstance() {
 		if (instance == null) {
 			synchronized (ImageUtil.class) {
@@ -30,34 +52,56 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (rounding utilities).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Line} helper (line rasterization).
+	 *
+	 * @return the {@code Line} singleton
+	 */
 	public Line getLine() {
 		return Line.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release buffers.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Contour} helper (edge pixel pair fixing).
+	 *
+	 * @return the {@code Contour} singleton
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: bits6To8 - Takes an array of unsigned characters and bitwise shifts
-	 * #cat: each value 2 postitions to the left. This is equivalent #cat: to
-	 * multiplying each value by 4. This puts original values #cat: on the range
-	 * [0..64) now on the range [0..256). Another #cat: way to say this, is the
-	 * original 6-bit values now fit in #cat: 8 bits. This is to be used to undo the
-	 * effects of bits_8to6. Input: imageData - input array of unsigned characters
-	 * imageWidth - width (in characters) of the input array imageHeight - height
-	 * (in characters) of the input array Output: imageData - contains the
-	 * bit-shifted results
-	 **************************************************************************/
+	/**
+	 * Takes an array of unsigned 8-bit values and bitwise shifts each value two
+	 * positions to the left.
+	 * <p>
+	 * NIST: {@code bits_6to8()}. This is equivalent to multiplying each value by
+	 * 4, which puts original values on the range [0..64) onto the range
+	 * [0..256); in other words the original 6-bit values now fit in 8 bits. This
+	 * is used to undo the effects of {@link #bits8To6(int[], int, int)}.
+	 *
+	 * @param imageData   input/output: image data; on return contains the
+	 *                    bit-shifted results
+	 * @param imageWidth  width (in pixels) of the input array
+	 * @param imageHeight height (in pixels) of the input array
+	 */
 	public void bits6To8(int[] imageData, int imageWidth, int imageHeight) {
 		int imageSize;
 		int iptrIndex;
@@ -70,18 +114,21 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: bits8To6 - Takes an array of unsigned characters and bitwise shifts
-	 * #cat: each value 2 postitions to the right. This is equivalent #cat: to
-	 * dividing each value by 4. This puts original values #cat: on the range
-	 * [0..256) now on the range [0..64). Another #cat: way to say this, is the
-	 * original 8-bit values now fit in #cat: 6 bits. I would really like to make
-	 * this dependency #cat: go away. Input: imageData - input array of unsigned
-	 * characters imageWidth - width (in characters) of the input array imageHeight
-	 * - height (in characters) of the input array Output: imageData - contains the
-	 * bit-shifted results
-	 **************************************************************************/
+	/**
+	 * Takes an array of unsigned 8-bit values and bitwise shifts each value two
+	 * positions to the right.
+	 * <p>
+	 * NIST: {@code bits_8to6()}. This is equivalent to dividing each value by 4,
+	 * which puts original values on the range [0..256) onto the range [0..64);
+	 * in other words the original 8-bit values now fit in 6 bits (as required by
+	 * the LFS DFT/direction analysis). The NIST author noted a desire to make
+	 * this dependency go away.
+	 *
+	 * @param imageData   input/output: image data; on return contains the
+	 *                    bit-shifted results
+	 * @param imageWidth  width (in pixels) of the input array
+	 * @param imageHeight height (in pixels) of the input array
+	 */
 	public void bits8To6(int[] imageData, int imageWidth, int imageHeight) {
 		int imageSize;
 		int iptrIndex;
@@ -94,20 +141,24 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: grayToBinary - Takes an 8-bit threshold value and two 8-bit pixel
-	 * values. #cat: Those pixels in the image less than the threhsold are set #cat:
-	 * to the first specified pixel value, whereas those pixels #cat: greater than
-	 * or equal to the threshold are set to the second #cat: specified pixel value.
-	 * On application for this routine is #cat: to convert binary images from 8-bit
-	 * pixels valued {0,255} to #cat: {1,0} and vice versa. Input: threshold - 8-bit
-	 * pixel threshold lessPixel - pixel value used when image pixel is < threshold
-	 * greaterPixel - pixel value used when image pixel is >= threshold
-	 * binarizedmageData - 8-bit image data imageWidth - width (in pixels) of the
-	 * image imageHeight - height (in pixels) of the image Output: binarizedmageData
-	 * - altered 8-bit image data
-	 **************************************************************************/
+	/**
+	 * Thresholds an 8-bit image into two specified pixel values.
+	 * <p>
+	 * NIST: {@code gray2bin()}. Pixels in the image less than the threshold are
+	 * set to the first specified pixel value, whereas pixels greater than or
+	 * equal to the threshold are set to the second specified pixel value. One
+	 * application for this routine is to convert binary images from 8-bit pixels
+	 * valued {0,255} to {1,0} and vice versa.
+	 *
+	 * @param threshold         8-bit pixel threshold
+	 * @param lessPixel         pixel value used when image pixel is
+	 *                          {@code < threshold}
+	 * @param greaterPixel      pixel value used when image pixel is
+	 *                          {@code >= threshold}
+	 * @param binarizedmageData input/output: 8-bit image data, altered in place
+	 * @param imageWidth        width (in pixels) of the image
+	 * @param imageHeight       height (in pixels) of the image
+	 */
 	public void grayToBinary(final int threshold, final int lessPixel, final int greaterPixel, int[] binarizedmageData,
 			final int imageWidth, final int imageHeight) {
 		int imageSize = imageWidth * imageHeight;
@@ -120,22 +171,28 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: padImage - Copies an 8-bit grayscale images into a larger #cat: output
-	 * image centering the input image so as to #cat: add a specified amount of
-	 * pixel padding along the #cat: entire perimeter of the input image. The amount
-	 * of #cat: pixel padding and the intensity of the pixel padding #cat: are
-	 * specified. An alternative to padding with a #cat: constant intensity would be
-	 * to copy the edge pixels #cat: of the centered image into the adjacent pad
-	 * area. Input: imageData - input 8-bit grayscale image imageWidth - width (in
-	 * pixels) of the input image imageHeight - height (in pixels) of the input
-	 * image pad - size of padding (in pixels) to be added padValue - intensity of
-	 * the padded area Output: ret - Zero - successful completion - Negative -
-	 * system error ow - width (in pixels) of the padded image oh - height (in
-	 * pixels) of the padded image Return Code: optr - points to the newly padded
-	 * image
-	 **************************************************************************/
+	/**
+	 * Copies an 8-bit grayscale image into a larger output image, centering the
+	 * input image so as to add a specified amount of pixel padding along the
+	 * entire perimeter of the input image.
+	 * <p>
+	 * NIST: {@code pad_uchar_image()}. The amount of pixel padding and the
+	 * intensity of the pixel padding are specified. An alternative to padding
+	 * with a constant intensity would be to copy the edge pixels of the centered
+	 * image into the adjacent pad area. The padded image has dimensions
+	 * {@code (imageWidth + 2*pad) x (imageHeight + 2*pad)}.
+	 *
+	 * @param ret         output: zero ({@link ILfs#FALSE}) on successful
+	 *                    completion (negative would indicate a system error)
+	 * @param ow          output: width (in pixels) of the padded image
+	 * @param oh          output: height (in pixels) of the padded image
+	 * @param imageData   input 8-bit grayscale image
+	 * @param imageWidth  width (in pixels) of the input image
+	 * @param imageHeight height (in pixels) of the input image
+	 * @param pad         size of padding (in pixels) to be added on each side
+	 * @param padValue    intensity of the padded area
+	 * @return the newly allocated padded image
+	 */
 	public int[] padImage(AtomicInteger ret, AtomicInteger ow, AtomicInteger oh, int[] imageData, final int imageWidth,
 			final int imageHeight, final int pad, final int padValue) {
 		int[] paddedImagedata;
@@ -178,18 +235,20 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		return paddedImagedata;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: fillHoles - Takes an input image and analyzes triplets of horizontal
-	 * #cat: pixels first and then triplets of vertical pixels, filling #cat: in
-	 * holes of width 1. A hole is defined as the case where #cat: the neighboring 2
-	 * pixels are equal, AND the center pixel #cat: is different. Each hole is
-	 * filled with the value of its #cat: immediate neighbors. This routine modifies
-	 * the input image. Input: binarizedmageData - binary image data to be processed
-	 * imageWidth - width (in pixels) of the binary input image imageHeight - height
-	 * (in pixels) of the binary input image Output: binarizedmageData - points to
-	 * the results
-	 **************************************************************************/
+	/**
+	 * Fills 1-pixel wide holes in a binary image.
+	 * <p>
+	 * NIST: {@code fill_holes()}. Analyzes triplets of horizontal pixels first
+	 * and then triplets of vertical pixels, filling in holes of width 1. A hole
+	 * is defined as the case where the two neighbouring pixels are equal AND the
+	 * centre pixel is different. Each hole is filled with the value of its
+	 * immediate neighbours. This routine modifies the input image.
+	 *
+	 * @param binarizedmageData input/output: binary image data to be processed;
+	 *                          on return contains the results
+	 * @param imageWidth        width (in pixels) of the binary input image
+	 * @param imageHeight       height (in pixels) of the binary input image
+	 */
 	public void fillHoles(int[] binarizedmageData, final int imageWidth, final int imageHeight) {
 		int xIndex;
 		int yIndex;
@@ -270,19 +329,27 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: freePath - Traverses a straight line between 2 pixel points in an #cat:
-	 * image and determines if a "free path" exists between the #cat: 2 points by
-	 * counting the number of pixel value transitions #cat: between adjacent pixels
-	 * along the trajectory. Input: x1 - x-pixel coord of first point y1 - y-pixel
-	 * coord of first point x2 - x-pixel coord of second point y2 - y-pixel coord of
-	 * second point binarizedmageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image lfsparms - parameters and threshold for controlling LFS Return Code:
-	 * TRUE - free path determined to exist FALSE - free path determined not to
-	 * exist Negative - system error
-	 **************************************************************************/
+	/**
+	 * Traverses a straight line between two pixel points in an image and
+	 * determines whether a "free path" exists between them.
+	 * <p>
+	 * NIST: {@code free_path()}. Counts the number of pixel value transitions
+	 * between adjacent pixels along the trajectory (computed with
+	 * {@link Line#linePoints}); the path is free if the count does not exceed
+	 * {@link LfsParams#getMaxTrans()}.
+	 *
+	 * @param x1                x-pixel coord of first point
+	 * @param y1                y-pixel coord of first point
+	 * @param x2                x-pixel coord of second point
+	 * @param y2                y-pixel coord of second point
+	 * @param binarizedmageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth        width (in pixels) of image
+	 * @param imageHeight       height (in pixels) of image
+	 * @param lfsParams         parameters and thresholds for controlling LFS
+	 * @return {@link ILfs#TRUE} if a free path is determined to exist;
+	 *         {@link ILfs#FALSE} if a free path is determined not to exist;
+	 *         negative on system error (propagated from line computation)
+	 */
 	public int freePath(final int x1, final int y1, final int x2, final int y2, int[] binarizedmageData,
 			final int imageWidth, final int imageHeight, final LfsParams lfsParams) {
 		int[] xList;
@@ -342,22 +409,32 @@ public class ImageUtil extends MindTct implements IImageUtil {
 		return (ILfs.TRUE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: searchInDirection - Takes a specified maximum number of steps in a
-	 * #cat: specified direction looking for the first occurence of #cat: a pixel
-	 * with specified value. (Once found, adjustments #cat: are potentially made to
-	 * make sure the resulting pixel #cat: and its associated edge pixel are
-	 * 4-connected.) Input: pix - value of pixel to be searched for startX - x-pixel
-	 * coord to start search startY - y-pixel coord to start search deltaX -
-	 * increment in x for each step deltaY - increment in y for each step maxsteps -
-	 * maximum number of steps to conduct search binarizedmageData - binary image
-	 * data (0==while & 1==black) imageWidth - width (in pixels) of image
-	 * imageHeight - height (in pixels) of image Output: ox - x coord of located
-	 * pixel oy - y coord of located pixel oex - x coord of associated edge pixel
-	 * oey - y coord of associated edge pixel Return Code: TRUE - pixel of specified
-	 * value found FALSE - pixel of specified value NOT found
-	 **************************************************************************/
+	/**
+	 * Takes a specified maximum number of steps in a specified direction looking
+	 * for the first occurrence of a pixel with a specified value.
+	 * <p>
+	 * NIST: {@code search_in_direction()}. Once found, adjustments are
+	 * potentially made (via {@link Contour#fixEdgePixelPair}) to make sure the
+	 * resulting pixel and its associated edge pixel are 4-connected, so the pair
+	 * can be used for contour tracing. If the pixel is not found, or the search
+	 * steps outside the image, all outputs are set to -1.
+	 *
+	 * @param ox                output: x coord of located pixel
+	 * @param oy                output: y coord of located pixel
+	 * @param oex               output: x coord of associated edge pixel
+	 * @param oey               output: y coord of associated edge pixel
+	 * @param pix               value of pixel to be searched for
+	 * @param startX            x-pixel coord to start search
+	 * @param startY            y-pixel coord to start search
+	 * @param deltaX            increment in x for each step
+	 * @param deltaY            increment in y for each step
+	 * @param maxsteps          maximum number of steps to conduct search
+	 * @param binarizedmageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth        width (in pixels) of image
+	 * @param imageHeight       height (in pixels) of image
+	 * @return {@link ILfs#TRUE} if a pixel of the specified value was found;
+	 *         {@link ILfs#FALSE} if it was NOT found
+	 */
 	public int searchInDirection(AtomicInteger ox, AtomicInteger oy, AtomicInteger oex, AtomicInteger oey,
 			final int pix, final int startX, final int startY, final double deltaX, final double deltaY,
 			final int maxsteps, int[] binarizedmageData, final int imageWidth, final int imageHeight) {

@@ -254,6 +254,22 @@ class LfsUtilTest {
     }
 
     /**
+     * Returns the range error code (-370) when the index is negative and also not below the
+     * (negative) list length, leaving the list unchanged.
+     */
+    @Test
+    void removeValueFromLocationInListNegativeIndexAndLengthReturnsRangeError() {
+        AtomicIntegerArray list = new AtomicIntegerArray(new int[]{1, 5, 3});
+
+        int result = lfsUtil.removeValueFromLocationInList(-1, list, -5);
+
+        Assertions.assertEquals(-370, result);
+        Assertions.assertEquals(1, list.get(0));
+        Assertions.assertEquals(5, list.get(1));
+        Assertions.assertEquals(3, list.get(2));
+    }
+
+    /**
      * Calculates correct direction difference with wrap around.
      */
     @Test

@@ -1,21 +1,23 @@
 package org.mosip.nist.nfiq1;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.mockito.junit.MockitoJUnitRunner;
-
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.INfiq;
 import org.mosip.nist.nfiq1.common.ILfs.Minutia;
 import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
+import org.mosip.nist.nfiq1.imagetools.ImageDecoder;
 import org.mosip.nist.nfiq1.mindtct.Maps;
 import org.mosip.nist.nfiq1.mindtct.Quality;
+import org.mosip.nist.nfiq1.util.ImageUtil;
 
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,8 +25,10 @@ import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doReturn;
@@ -37,6 +41,7 @@ import static org.mockito.Mockito.when;
  * including empty images, valid data processing, and error conditions.
  */
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 public class Nfiq1HelperTest {
 
     private Nfiq1Helper nfiq1Helper;
@@ -54,10 +59,20 @@ public class Nfiq1HelperTest {
      * Sets up the test environment before each test method execution.
      * Initializes mocks and creates a spy instance of Nfiq1Helper for testing.
      */
-    @Before
+    private boolean originalShowLogs;
+
+    @BeforeEach
     public void setUp() {
-        MockitoAnnotations.openMocks(this);
+        originalShowLogs = Nist.isShowLogs();
         nfiq1Helper = spy(new Nfiq1Helper());
+    }
+
+    /**
+     * Restores the static show-logs flag so other test classes are not affected.
+     */
+    @AfterEach
+    public void tearDown() {
+        Nist.setShowLogs(originalShowLogs);
     }
 
     /**
@@ -643,5 +658,203 @@ public class Nfiq1HelperTest {
 
         assertEquals(0.1, outacsarr[0], 0.001);
         assertEquals(0.8, outacsarr[2], 0.001);
+    }
+
+    /**
+     * Decoded grayscale sample image used by the end-to-end tests.
+     */
+    private record DecodedImage(int[] data, int width, int height, int depth, int ppi) {
+    }
+
+    /**
+     * Decodes one of the bundled ISO sample fingerprints into 8-bit grayscale pixel data, the
+     * same way the sample application does. The file is looked up under src/test/resources
+     * first and then in the module directory (paths are relative to the working directory).
+     */
+    private DecodedImage decodeSample(String sampleName) throws Exception {
+        String isoFile = "src/test/resources/" + sampleName;
+        AtomicInteger retCode = new AtomicInteger(-1);
+        AtomicInteger imageType = new AtomicInteger(-1);
+        AtomicInteger length = new AtomicInteger();
+        AtomicInteger width = new AtomicInteger();
+        AtomicInteger height = new AtomicInteger();
+        AtomicInteger depth = new AtomicInteger();
+        AtomicInteger ppi = new AtomicInteger();
+        AtomicReference<String> fileType = new AtomicReference<>();
+
+        BufferedImage image = ImageDecoder.getInstance().readAndDecodeGrayscaleImage(retCode, isoFile, imageType,
+                length, width, height, depth, ppi, fileType);
+        assertEquals(ILfs.FALSE, retCode.get());
+        assertNotNull(image);
+
+        int[] data = ImageUtil.convertTo1DWithoutUsingGetRGB(image, "jpg");
+        return new DecodedImage(data, width.get(), height.get(), depth.get(), ppi.get());
+    }
+
+    /**
+     * Runs the full NFIQ pipeline twice on the bundled JPEG2000 sample with logging disabled and
+     * verifies a valid quality level (1..5) and confidence in (0, 1] are produced, identically
+     * on both runs (no state leaks between runs through the shared singletons).
+     */
+    @Test
+    public void computeNfiqJp2SampleEndToEndWithoutLogsIsDeterministic() throws Exception {
+        DecodedImage image = decodeSample("info_jp2.iso");
+        Nfiq1Helper helper = new Nfiq1Helper();
+        AtomicInteger firstNfiq = new AtomicInteger();
+        AtomicReference<Double> firstConf = new AtomicReference<>(0.0);
+        AtomicInteger secondNfiq = new AtomicInteger();
+        AtomicReference<Double> secondConf = new AtomicReference<>(0.0);
+
+        int first = helper.computeNfiq(firstNfiq, firstConf, image.data().clone(), image.width(),
+                image.height(), image.depth(), image.ppi(), 0);
+        int second = helper.computeNfiq(secondNfiq, secondConf, image.data().clone(), image.width(),
+                image.height(), image.depth(), image.ppi(), 0);
+
+        assertEquals(ILfs.FALSE, first);
+        assertEquals(ILfs.FALSE, second);
+        assertFalse(Nist.isShowLogs());
+        assertTrue(firstNfiq.get() >= 1 && firstNfiq.get() <= INfiq.NFIQ_NUM_CLASSES);
+        assertTrue(firstConf.get() > 0.0 && firstConf.get() <= 1.0);
+        assertEquals(firstNfiq.get(), secondNfiq.get());
+        assertEquals(firstConf.get(), secondConf.get(), 1e-12);
+    }
+
+    /**
+     * Runs the full NFIQ pipeline on the bundled WSQ sample with detailed logging enabled and
+     * verifies a valid quality level and confidence are produced.
+     */
+    @Test
+    public void computeNfiqWsqSampleEndToEndWithLogs() throws Exception {
+        DecodedImage image = decodeSample("info_wsq.iso");
+        Nfiq1Helper helper = new Nfiq1Helper();
+        AtomicInteger oNfiq = new AtomicInteger();
+        AtomicReference<Double> oConf = new AtomicReference<>(0.0);
+
+        int result = helper.computeNfiq(oNfiq, oConf, image.data(), image.width(), image.height(),
+                image.depth(), image.ppi(), 1);
+
+        assertEquals(ILfs.FALSE, result);
+        assertTrue(Nist.isShowLogs());
+        assertTrue(oNfiq.get() >= 1 && oNfiq.get() <= INfiq.NFIQ_NUM_CLASSES);
+        assertTrue(oConf.get() > 0.0 && oConf.get() <= 1.0);
+    }
+
+    /**
+     * Verifies computeNfiqFlex propagates the minutiae-detection error when the image is not
+     * 8 bits deep, leaving the output values untouched.
+     */
+    @Test
+    public void computeNfiqFlexRejectsNonEightBitImage() {
+        Nfiq1Helper helper = new Nfiq1Helper();
+        Nfiq1Globals globals = helper.getNfiqGlobals();
+        AtomicInteger oNfiq = new AtomicInteger(-7);
+        AtomicReference<Double> oConf = new AtomicReference<>(-7.0);
+
+        int result = helper.computeNfiqFlex(oNfiq, oConf, createSampleImageData(), 100, 100, 16, 500,
+                globals.getDfltZnormMeans(), globals.getDfltZnormStds(), globals.getDfltNInps(),
+                globals.getDfltNHids(), globals.getDfltNOuts(), globals.getDfltAcFuncHids(),
+                globals.getDfltAcFuncOuts(), globals.getDfltWts());
+
+        assertTrue(result < ILfs.FALSE);
+        assertEquals(-7, oNfiq.get());
+        assertEquals(-7.0, oConf.get(), 0.0);
+    }
+
+    /**
+     * Verifies computeNfiqFlex returns the MLP error code when an unsupported hidden-layer
+     * activation function is requested for a real fingerprint.
+     */
+    @Test
+    public void computeNfiqFlexReturnsMlpErrorForUnsupportedActivation() throws Exception {
+        DecodedImage image = decodeSample("info_jp2.iso");
+        Nfiq1Helper helper = new Nfiq1Helper();
+        Nfiq1Globals globals = helper.getNfiqGlobals();
+        AtomicInteger oNfiq = new AtomicInteger(-7);
+        AtomicReference<Double> oConf = new AtomicReference<>(0.0);
+
+        int result = helper.computeNfiqFlex(oNfiq, oConf, image.data(), image.width(), image.height(),
+                image.depth(), image.ppi(), globals.getDfltZnormMeans(), globals.getDfltZnormStds(),
+                globals.getDfltNInps(), globals.getDfltNHids(), globals.getDfltNOuts(), 999,
+                globals.getDfltAcFuncOuts(), globals.getDfltWts());
+
+        assertEquals(-3, result);
+        assertEquals(-7, oNfiq.get());
+    }
+
+    /**
+     * Verifies computeNfiqFlex maps an empty feature vector to the empty-image quality level
+     * with full confidence.
+     */
+    @Test
+    public void computeNfiqFlexEmptyFeatureVectorGivesEmptyImageQuality() throws Exception {
+        DecodedImage image = decodeSample("info_jp2.iso");
+        Nfiq1Globals globals = nfiq1Helper.getNfiqGlobals();
+        doReturn(INfiq.EMPTY_IMG).when(nfiq1Helper).computeNfiqFeatureVector(any(), anyInt(), any(), any(),
+                anyInt(), anyInt());
+        AtomicInteger oNfiq = new AtomicInteger();
+        AtomicReference<Double> oConf = new AtomicReference<>(0.0);
+
+        int result = nfiq1Helper.computeNfiqFlex(oNfiq, oConf, image.data(), image.width(), image.height(),
+                image.depth(), image.ppi(), globals.getDfltZnormMeans(), globals.getDfltZnormStds(),
+                globals.getDfltNInps(), globals.getDfltNHids(), globals.getDfltNOuts(),
+                globals.getDfltAcFuncHids(), globals.getDfltAcFuncOuts(), globals.getDfltWts());
+
+        assertEquals(INfiq.EMPTY_IMG, result);
+        assertEquals(INfiq.EMPTY_IMG_QUAL, oNfiq.get());
+        assertEquals(1.0, oConf.get(), 0.0);
+    }
+
+    /**
+     * Verifies a blank (uniform white) image yields too few minutiae and is assigned the
+     * minimum-minutiae quality level with full confidence.
+     */
+    @Test
+    public void computeNfiqBlankImageReportsTooFewMinutiae() {
+        Nfiq1Helper helper = new Nfiq1Helper();
+        int[] blank = new int[200 * 200];
+        java.util.Arrays.fill(blank, 255);
+        AtomicInteger oNfiq = new AtomicInteger();
+        AtomicReference<Double> oConf = new AtomicReference<>(0.0);
+
+        int result = helper.computeNfiq(oNfiq, oConf, blank, 200, 200, 8, 500, 0);
+
+        assertEquals(INfiq.TOO_FEW_MINUTIAE, result);
+        assertEquals(INfiq.MIN_MINUTIAE_QUAL, oNfiq.get());
+        assertEquals(1.0, oConf.get(), 0.0);
+    }
+
+    /**
+     * Verifies the computed feature vector values (foreground, minutiae count, reliability bins
+     * and quality-map ratios) for a known quality map and minutiae set.
+     */
+    @Test
+    public void computeNfiqFeatureVectorComputesExpectedValues() {
+        double[] featureVector = new double[INfiq.NFIQ_VCTRLEN];
+        AtomicReference<Minutiae> oMinutiae = new AtomicReference<>(createMinutiaeWithReliabilities());
+        int[] levels = new int[100];
+        int index = 0;
+        int[] histogram = {20, 30, 25, 15, 10};
+        for (int level = 0; level < histogram.length; level++) {
+            for (int count = 0; count < histogram[level]; count++) {
+                levels[index++] = level;
+            }
+        }
+        when(mockQualityMap.getQualityMap()).thenReturn(new AtomicIntegerArray(levels));
+
+        int result = nfiq1Helper.computeNfiqFeatureVector(featureVector, INfiq.NFIQ_VCTRLEN, oMinutiae,
+                mockQualityMap, 10, 10);
+
+        assertEquals(ILfs.FALSE, result);
+        assertEquals(80.0, featureVector[0], 1e-9);
+        assertEquals(5.0, featureVector[1], 1e-9);
+        assertEquals(4.0, featureVector[2], 1e-9);
+        assertEquals(3.0, featureVector[3], 1e-9);
+        assertEquals(2.0, featureVector[4], 1e-9);
+        assertEquals(1.0, featureVector[5], 1e-9);
+        assertEquals(1.0, featureVector[6], 1e-9);
+        assertEquals(30.0 / 80.0, featureVector[7], 1e-9);
+        assertEquals(25.0 / 80.0, featureVector[8], 1e-9);
+        assertEquals(15.0 / 80.0, featureVector[9], 1e-9);
+        assertEquals(10.0 / 80.0, featureVector[10], 1e-9);
     }
 }

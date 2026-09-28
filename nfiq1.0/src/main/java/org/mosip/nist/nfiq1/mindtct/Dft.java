@@ -14,15 +14,38 @@ import org.mosip.nist.nfiq1.common.ILfs.RotGrids;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Discrete Fourier Transform (DFT) analysis of image blocks, used to estimate the dominant ridge-flow
+ * direction of each block in MINDTCT's direction map.
+ * <p>
+ * Port of NIST LFS {@code dft.c} ({@code dft_dir_powers}, {@code sum_rot_block_rows}, {@code dft_power},
+ * {@code dft_power_stats}, {@code get_max_norm}, {@code sort_dft_waves}). Each block is sampled along rotated
+ * pixel rows for every direction, the row sums are correlated with several sine/cosine wave forms, and the
+ * resulting power statistics are ranked so the map-building code can choose a dominant direction.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized and the class keeps no mutable state. Many
+ * of the accessor methods below are not used by this class; they give access to the shared MINDTCT helper
+ * singletons.
+ */
 public class Dft extends MindTct implements IDft {
+	/** SLF4J logger for input errors. */
 	private static final Logger logger = LoggerFactory.getLogger(Dft.class);
 
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static Dft instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private Dft() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code Dft} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized Dft getInstance() {
 		if (instance == null) {
 			instance = new Dft();
@@ -30,90 +53,163 @@ public class Dft extends MindTct implements IDft {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared numeric-definitions helper (rounding and precision truncation).
+	 *
+	 * @return the {@link Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the MINDTCT image utility helper.
+	 *
+	 * @return the {@link ImageUtil} singleton (MINDTCT package version)
+	 */
 	public ImageUtil getImageUtil() {
 		return ImageUtil.getInstance();
 	}
 
+	/**
+	 * Returns the MINDTCT global lookup tables.
+	 *
+	 * @return the {@link Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
+	/**
+	 * Returns the general LFS utility helper.
+	 *
+	 * @return the {@link LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
+	/**
+	 * Returns the memory-release helper.
+	 *
+	 * @return the {@link Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the LFS initialization helper.
+	 *
+	 * @return the {@link Init} singleton
+	 */
 	public Init getInit() {
 		return Init.getInstance();
 	}
 
+	/**
+	 * Returns the directional binarization helper.
+	 *
+	 * @return the {@link Binarization} singleton
+	 */
 	public Binarization getBinarization() {
 		return Binarization.getInstance();
 	}
 
+	/**
+	 * Returns the minutia allocation and detection helper.
+	 *
+	 * @return the {@link MinutiaHelper} singleton
+	 */
 	public MinutiaHelper getMinutiaHelper() {
 		return MinutiaHelper.getInstance();
 	}
 
+	/**
+	 * Returns the sorting helper, used to rank DFT wave statistics.
+	 *
+	 * @return the {@link Sort} singleton
+	 */
 	public Sort getSort() {
 		return Sort.getInstance();
 	}
 
+	/**
+	 * Returns the LFS minutiae detection driver.
+	 *
+	 * @return the {@link Detect} singleton
+	 */
 	public Detect getDetect() {
 		return Detect.getInstance();
 	}
 
+	/**
+	 * Returns the false-minutia removal helper.
+	 *
+	 * @return the {@link RemoveMinutia} singleton
+	 */
 	public RemoveMinutia getRemoveMinutia() {
 		return RemoveMinutia.getInstance();
 	}
 
+	/**
+	 * Returns the neighbour ridge counting helper.
+	 *
+	 * @return the {@link Ridges} singleton
+	 */
 	public Ridges getRidges() {
 		return Ridges.getInstance();
 	}
 
+	/**
+	 * Returns the line-tracing helper.
+	 *
+	 * @return the {@link Line} singleton
+	 */
 	public Line getLine() {
 		return Line.getInstance();
 	}
 
+	/**
+	 * Returns the contour-tracing helper.
+	 *
+	 * @return the {@link Contour} singleton
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the loop (lake/island) processing helper.
+	 *
+	 * @return the {@link Loop} singleton
+	 */
 	public Loop getLoop() {
 		return Loop.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dftDirPowers - Conducts the DFT analysis on a block of image data.
-	 * #cat: The image block is sampled across a range of orientations #cat:
-	 * (directions) and multiple wave forms of varying frequency are #cat: applied
-	 * at each orientation. At each orentation, pixels are #cat: accumulated along
-	 * each rotated pixel row, creating a vector #cat: of pixel row sums. Each DFT
-	 * wave form is then applied #cat: individually to this vector of pixel row
-	 * sums. A DFT power #cat: value is computed for each wave form (frequency0 at
-	 * each #cat: orientaion within the image block. Therefore, the resulting DFT
-	 * #cat: power vectors are of dimension (N Waves X M Directions). #cat: The
-	 * power signatures derived form this process are used to #cat: determine
-	 * dominant direction flow within the image block. Input: paddedImagedata - the
-	 * padded input image. It is important that the image be properly padded, or
-	 * else the sampling at various block orientations may result in accessing
-	 * unkown memory. blockOffset - the pixel offset form the origin of the padded
-	 * image to the origin of the current block in the image paddedImageWidth - the
-	 * width (in pixels) of the padded input image paddedImageHeight - the height
-	 * (in pixels) of the padded input image dftWaves - structure containing the DFT
-	 * wave forms dftGrids - structure containing the rotated pixel grid offsets
-	 * Output: powers - DFT power computed from each wave form frequencies at each
-	 * orientation (direction) in the current image block Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Runs the DFT analysis on one block of image data (NIST {@code dft_dir_powers}).
+	 * <p>
+	 * The block is sampled across a range of orientations (directions), and several wave forms of different
+	 * frequencies are applied at each orientation. At each orientation, pixels are summed along each rotated
+	 * pixel row to form a vector of row sums ({@link #sumRotBlockRows}). Each DFT wave form is then applied to
+	 * that vector separately ({@link #computeDftPower}), giving one power value per wave form (frequency) per
+	 * orientation. The resulting power vectors therefore have dimension (N waves x M directions). These power
+	 * signatures are used to determine the dominant ridge-flow direction within the block.
+	 *
+	 * @param powers            input/output: DFT power vectors indexed {@code [wave][direction]}, pre-allocated by
+	 *                          the caller and filled in place with the power of each wave form at each direction
+	 * @param paddedImagedata   the padded input image. It must be padded properly, or sampling at some block
+	 *                          orientations may read out-of-range indexes.
+	 * @param blockOffset       pixel offset from the origin of the padded image to the origin of the current block
+	 * @param paddedImageWidth  width (in pixels) of the padded input image
+	 * @param paddedImageHeight height (in pixels) of the padded input image
+	 * @param dftWaves          structure containing the DFT wave forms
+	 * @param dftGrids          structure containing the rotated pixel grid offsets (must be square)
+	 * @return 0 ({@link ILfs#FALSE}) on success; -90 if the DFT grids are not square; {@link ILfs#ERROR_CODE_91}
+	 *         if the row-sum buffer cannot be allocated
+	 */
 	@SuppressWarnings("unused")
 	public int dftDirPowers(AtomicReferenceArray<Double[]> powers, int[] paddedImagedata, final int blockOffset,
 			final int paddedImageWidth, final int paddedImageHeight, DftWaves dftWaves, RotGrids dftGrids) {
@@ -157,18 +253,20 @@ public class Dft extends MindTct implements IDft {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sumRotBlockRows - Computes a vector or pixel row sums by sampling #cat:
-	 * the current image block at a given orientation. The #cat: sampling is
-	 * conducted using a precomputed set of rotated #cat: pixel offsets (called a
-	 * grid) relative to the orgin of #cat: the image block. Input: paddedImagedata
-	 * - the current image block paddedImageDataIndex - the pixel address of the
-	 * origin of the current image block gridOffsets - the rotated pixel offsets for
-	 * a block-sized grid rotated according to a specific orientation
-	 * blockOffsetSize - the width and height of the image block and thus the size
-	 * of the rotated grid Output: rowSums - the resulting vector of pixel row sums
-	 **************************************************************************/
+	/**
+	 * Computes a vector of pixel row sums by sampling the current image block at one orientation (NIST
+	 * {@code sum_rot_block_rows}).
+	 * <p>
+	 * The sampling uses a precomputed set of rotated pixel offsets (a "grid") relative to the origin of the
+	 * image block.
+	 *
+	 * @param rowSums              output: receives one sum per rotated row; must hold at least
+	 *                             {@code blockOffsetSize} elements
+	 * @param paddedImagedata      the padded image containing the current block
+	 * @param paddedImageDataIndex pixel index of the origin of the current image block
+	 * @param gridOffsets          rotated pixel offsets for a block-sized grid rotated to one orientation
+	 * @param blockOffsetSize      width and height of the image block, and so the size of the rotated grid
+	 */
 	public void sumRotBlockRows(int[] rowSums, int[] paddedImagedata, final int paddedImageDataIndex,
 			final AtomicIntegerArray gridOffsets, final int blockOffsetSize) {
 		int gi;
@@ -190,17 +288,18 @@ public class Dft extends MindTct implements IDft {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: computeDftPower - Computes the DFT power by applying a specific wave
-	 * form #cat: frequency to a vector of pixel row sums computed from a #cat:
-	 * specific orientation of the block image Input: rowSums - accumulated rows of
-	 * pixels from within a rotated grid overlaying an input image block wave - the
-	 * wave form (cosine and sine components) at a specific frequency waveLen - the
-	 * length of the wave form (must match the height of the image block which is
-	 * the length of the rowsum vector) Output: oPower - the computed DFT power for
-	 * the given wave form at the given orientation within the image block
-	 **************************************************************************/
+	/**
+	 * Computes the DFT power of one wave form applied to a vector of row sums from one block orientation (NIST
+	 * {@code dft_power}).
+	 * <p>
+	 * power = (sum of rowSums[i] * cos[i])^2 + (sum of rowSums[i] * sin[i])^2.
+	 *
+	 * @param oPower   output: the DFT power for this wave form at this orientation within the block
+	 * @param rowSums  summed rows of pixels from a rotated grid laid over the image block
+	 * @param dftWave  the wave form (cosine and sine components) at one frequency
+	 * @param waveLen  length of the wave form; must equal the block height, which is the length of
+	 *                 {@code rowSums}
+	 */
 	public void computeDftPower(AtomicReference<Double> oPower, final int[] rowSums, final DftWave dftWave,
 			final int waveLen) {
 		/* Initialize accumulators */
@@ -219,31 +318,27 @@ public class Dft extends MindTct implements IDft {
 		oPower.set((cospart * cospart) + (sinpart * sinpart));
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getDftPowerStats - Derives statistics from a set of DFT power vectors.
-	 * #cat: Statistics are computed for all but the lowest frequency #cat: wave
-	 * form, including the Maximum power for each wave form, #cat: the direction at
-	 * which the maximum power occured, and a #cat: normalized value for the maximum
-	 * power. In addition, the #cat: statistics are ranked in descending order based
-	 * on normalized #cat: squared maximum power. These statistics are fundamental
-	 * #cat: to selecting a dominant direction flow for the current #cat: input
-	 * image block. Input: powers - DFT power vectors (N Waves X M Directions)
-	 * computed for the current image block from which the values in the statistics
-	 * arrays are derived fw - the beginning of the range of wave form indices from
-	 * which the statistcs are to derived tw - the ending of the range of wave form
-	 * indices from which the statistcs are to derived (last index is tw-1) nDirs -
-	 * number of orientations (directions) at which the DFT analysis was conducted
-	 * Output: ret - Zero - successful completion - Negative - system error powMaxs
-	 * - array holding the maximum DFT power for each wave form (other than the
-	 * lowest frequecy) powmaxDirs - array to holding the direction corresponding to
-	 * each maximum power value in powMaxs powNorms - array to holding the
-	 * normalized maximum powers corresponding to each value in powMaxs Return Code:
-	 * wis - list of ranked wave form indicies of the corresponding statistics based
-	 * on normalized squared maximum power. These indices will be used as indirect
-	 * addresses when processing the power statistics in descending order of
-	 * "dominance"
-	 **************************************************************************/
+	/**
+	 * Derives ranked statistics from a set of DFT power vectors (NIST {@code dft_power_stats}).
+	 * <p>
+	 * For each wave form in {@code [fw, tw)} (normally every wave except the lowest frequency), computes the
+	 * maximum power, the direction where it occurs, and a normalized maximum power ({@link #getMaxNorm}). The
+	 * statistics are then ranked in descending order of normalized squared maximum power
+	 * ({@link #sortDftWaves}). These statistics are central to choosing the dominant ridge-flow direction of the
+	 * block.
+	 *
+	 * @param wis        output: wave form indexes of the statistics, ranked by normalized squared maximum
+	 *                   power; used as indirect addresses when processing the statistics in descending order of
+	 *                   "dominance"
+	 * @param powMaxs    output: maximum DFT power for each wave form in the range
+	 * @param powmaxDirs output: direction at which each maximum in {@code powMaxs} occurs
+	 * @param powNorms   output: normalized maximum power for each value in {@code powMaxs}
+	 * @param powers     DFT power vectors (N waves x M directions) computed for the current block
+	 * @param fw         first wave form index of the range (inclusive)
+	 * @param tw         end wave form index of the range (exclusive; the last index used is {@code tw - 1})
+	 * @param nDirs      number of orientations (directions) the DFT analysis was run at
+	 * @return 0 ({@link ILfs#FALSE}) on success; negative on system error
+	 */
 	public int getDftPowerStats(AtomicIntegerArray wis, AtomicReferenceArray<Double> powMaxs,
 			AtomicIntegerArray powmaxDirs, AtomicReferenceArray<Double> powNorms, AtomicReferenceArray<Double[]> powers,
 			final int fw, final int tw, final int nDirs) {
@@ -271,22 +366,21 @@ public class Dft extends MindTct implements IDft {
 		return ret;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getMaxNorm - Analyses a DFT power vector for a specific wave form #cat:
-	 * applied at different orientations (directions) to the #cat: current image
-	 * block. The routine retuns the maximum #cat: power value in the vector, the
-	 * direction at which the #cat: maximum occurs, and a normalized power value.
-	 * The #cat: normalized power is computed as the maximum power divided #cat: by
-	 * the average power across all the directions. These #cat: simple statistics
-	 * are fundamental to the selection of #cat: a dominant direction flow for the
-	 * image block. Input: oPowerVector - the DFT power values derived form a
-	 * specific wave form applied at different directions nDirs - the number of
-	 * directions to which the wave form was applied Output: powmax - the maximum
-	 * power value in the DFT power vector powmaxDir - the direciton at which the
-	 * maximum power value occured pownorm - the normalized power corresponding to
-	 * the maximum power
-	 **************************************************************************/
+	/**
+	 * Analyses the DFT power vector of one wave form applied at different orientations to the current block
+	 * (NIST {@code get_max_norm}).
+	 * <p>
+	 * Returns the maximum power in the vector, the direction where it occurs, and a normalized power: the
+	 * maximum power divided by the average power across all directions. The power sum is clamped to at least
+	 * {@link ILfs#MIN_POWER_SUM} to avoid dividing by zero. These simple statistics are central to choosing
+	 * the block's dominant ridge-flow direction.
+	 *
+	 * @param powmax       output: the maximum value in the DFT power vector
+	 * @param powmaxDir    output: the direction at which the maximum occurs
+	 * @param pownorm      output: the normalized power corresponding to the maximum
+	 * @param oPowerVector the DFT power values of one wave form at the different directions
+	 * @param nDirs        number of directions the wave form was applied at
+	 */
 	public void getMaxNorm(AtomicReference<Double> powmax, AtomicInteger powmaxDir, AtomicReference<Double> pownorm,
 			final AtomicReferenceArray<Double> oPowerVector, final int nDirs) {
 		int nDir;
@@ -321,18 +415,19 @@ public class Dft extends MindTct implements IDft {
 		pownorm.set(powmax.get() / powMean);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortDftWaves - Creates a ranked list of DFT wave form statistics #cat:
-	 * by sorting on the normalized squared maximum power. Input: powMaxs - maximum
-	 * DFT power for each wave form used to derive statistics powNorms - normalized
-	 * maximum power corresponding to values in powMaxs nStats - number of wave
-	 * forms used to derive statistics (N Wave - 1) Output: wis - sorted list of
-	 * indices corresponding to the ranked set of wave form statistics. These
-	 * indices will be used as indirect addresses when processing the power
-	 * statistics in descending order of "dominance" Return Code: ret - Zero -
-	 * successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Ranks DFT wave form statistics by normalized squared maximum power, {@code powMaxs[i] * powNorms[i]}
+	 * (NIST {@code sort_dft_waves}).
+	 * <p>
+	 * Sorts in descending order with {@code Sort.bubbleSortDoubleArrayDecremental2}.
+	 *
+	 * @param wis      output: sorted indexes of the ranked wave form statistics; used as indirect addresses when
+	 *                 processing the power statistics in descending order of "dominance"
+	 * @param powMaxs  maximum DFT power for each wave form used to derive the statistics
+	 * @param powNorms normalized maximum power for each value in {@code powMaxs}
+	 * @param nStats   number of wave forms used to derive the statistics (N waves - 1)
+	 * @return always 0 ({@link ILfs#FALSE}), meaning success
+	 */
 	@SuppressWarnings({ "java:S3516" })
 	public int sortDftWaves(AtomicIntegerArray wis, final AtomicReferenceArray<Double> powMaxs,
 			final AtomicReferenceArray<Double> powNorms, final int nStats) {

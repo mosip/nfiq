@@ -1,0 +1,23 @@
+# Module-level ignores for nfiq2.0 (the root .gitignore also applies).
+
+# Build output
+/target/
+
+# Local run artefacts
+/.local/
+/logs/
+*.log
+
+# Eclipse / STS
+/.metadata/
+/.settings/
+/.classpath
+/.project
+/.factorypath
+
+# IntelliJ / VS Code / SonarLint
+/.idea/
+*.iml
+/.vscode/
+/.sonarlint/
+/.scannerwork/

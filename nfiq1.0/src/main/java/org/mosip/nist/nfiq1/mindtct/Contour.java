@@ -8,13 +8,48 @@ import org.mosip.nist.nfiq1.Defs;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.IContour;
 
+/**
+ * Contour tracing and contour geometry routines for MINDTCT, and the contour
+ * data structure itself.
+ * <p>
+ * Port of NIST LFS {@code contour.c}. A contour of a minutia feature (a ridge
+ * or valley ending) is represented by two parallel lists of coordinate pairs:
+ * the 8-connected chain of "contour points" interior to the feature, and the
+ * corresponding "edge points" adjacent to each contour point on the exterior
+ * of the feature. This class serves a dual role:
+ * <ul>
+ * <li>as a stateless service (the singleton returned by
+ * {@link #getInstance()}) providing contour extraction, tracing, loop
+ * detection and geometric helpers; and</li>
+ * <li>as a contour value object (instances returned by
+ * {@link #allocateContour(AtomicInteger, int)} and the tracing methods)
+ * holding the four coordinate lists and the allocated point count.</li>
+ * </ul>
+ * The singleton accessors are synchronized. Individual contour instances are
+ * mutable and not thread-safe; the singleton itself should not be used as a
+ * contour value (its lists are {@code null} unless created via
+ * {@link #getInstance(int)}).
+ */
 public class Contour extends MindTct implements IContour {
+	/**
+	 * Lazily created singleton instance, see {@link #getInstance()} and
+	 * {@link #getInstance(int)}.
+	 */
 	private static Contour instance;
 
+	/**
+	 * Private constructor for the stateless singleton (contour lists are left
+	 * {@code null}); use {@link #getInstance()}.
+	 */
 	private Contour() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Contour} instance
+	 */
 	public static synchronized Contour getInstance() {
 		if (instance == null) {
 			instance = new Contour();
@@ -22,6 +57,16 @@ public class Contour extends MindTct implements IContour {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use with
+	 * contour lists pre-allocated to the given length.
+	 * <p>
+	 * If the singleton already exists, the argument is ignored and the existing
+	 * instance is returned unchanged.
+	 *
+	 * @param noOfContour number of items in each coordinate list to allocate
+	 * @return the singleton {@code Contour} instance
+	 */
 	public static synchronized Contour getInstance(int noOfContour) {
 		if (instance == null) {
 			instance = new Contour(noOfContour);
@@ -29,12 +74,26 @@ public class Contour extends MindTct implements IContour {
 		return instance;
 	}
 
+	/** X-pixel coords of the feature's contour points (interior to feature). */
 	private AtomicIntegerArray contourX;
+	/** Y-pixel coords of the feature's contour points (interior to feature). */
 	private AtomicIntegerArray contourY;
+	/** X-pixel coords of the feature's edge points (exterior to feature). */
 	private AtomicIntegerArray contourEx;
+	/** Y-pixel coords of the feature's edge points (exterior to feature). */
 	private AtomicIntegerArray contourEy;
+	/**
+	 * Allocated number of items in each coordinate list (the actual number of
+	 * points traced is reported separately by the tracing methods).
+	 */
 	private int noOfContour;
 
+	/**
+	 * Creates a contour value object with all four coordinate lists allocated
+	 * (zero-filled) to the given length.
+	 *
+	 * @param noOfContour number of items in each coordinate list
+	 */
 	private Contour(int noOfContour) {
 		super();
 		this.contourX = new AtomicIntegerArray(noOfContour);
@@ -44,63 +103,83 @@ public class Contour extends MindTct implements IContour {
 		this.noOfContour = noOfContour;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (rounding, modulo and precision
+	 * truncation).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release lists.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Globals} tables (8-neighbour offsets and chain
+	 * codes).
+	 *
+	 * @return the {@code Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link LfsUtil} helper.
+	 *
+	 * @return the {@code LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocateContour - Allocates the lists needed to represent the #cat:
-	 * contour of a minutia feature (a ridge or valley-ending). #cat: This includes
-	 * two lists of coordinate pairs. The first is #cat: the 8-connected chain of
-	 * points interior to the feature #cat: and are called the feature's "contour
-	 * points". #cat: The second is a list or corresponding points each #cat:
-	 * adjacent to its respective feature contour point in the first #cat: list and
-	 * on the exterior of the feature. These second points #cat: are called the
-	 * feature's "edge points". Don't be confused, #cat: both lists of points are on
-	 * the "edge". The first set is #cat: guaranteed 8-connected and the color of
-	 * the feature. The #cat: second set is NOT guaranteed to be 8-connected and its
-	 * points #cat: are opposite the color of the feature. Remeber that "feature"
-	 * #cat: means either ridge-ending (black pixels) or valley-ending #cat: (white
-	 * pixels). Input: noOfContour - number of items in each coordinate list to be
-	 * allocated Output: ret -Zero - lists were successfully allocated - Negative -
-	 * system (allocation) error Return Code: Contour contains below information
-	 * ocontourX - allocated x-coord list for feature's contour points ocontourY -
-	 * allocated y-coord list for feature's contour points ocontourEx - allocated
-	 * x-coord list for feature's edge points ocontourEy - allocated y-coord list
-	 * for feature's edge points
-	 **************************************************************************/
+	/**
+	 * Allocates the lists needed to represent the contour of a minutia feature
+	 * (a ridge or valley ending).
+	 * <p>
+	 * NIST: {@code allocate_contour()}. This includes two lists of coordinate
+	 * pairs. The first is the 8-connected chain of points interior to the
+	 * feature, called the feature's "contour points". The second is a list of
+	 * corresponding points, each adjacent to its respective feature contour point
+	 * in the first list and on the exterior of the feature; these are called the
+	 * feature's "edge points". Don't be confused: both lists of points are on the
+	 * "edge". The first set is guaranteed 8-connected and the color of the
+	 * feature. The second set is NOT guaranteed to be 8-connected and its points
+	 * are opposite the color of the feature. Remember that "feature" means either
+	 * ridge ending (black pixels) or valley ending (white pixels).
+	 *
+	 * @param ret         output: zero ({@link ILfs#FALSE}) if the lists were
+	 *                    successfully allocated (negative would indicate a system
+	 *                    allocation error)
+	 * @param noOfContour number of items in each coordinate list to be allocated
+	 * @return a new contour holding the allocated x/y lists for the feature's
+	 *         contour points and x/y lists for its edge points
+	 */
 	public Contour allocateContour(AtomicInteger ret, final int noOfContour) {
 		ret.set(ILfs.FALSE);
 		return new Contour(noOfContour);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: free_contour - Deallocates the lists used to represent the #cat:
-	 * contour of a minutia feature (a ridge or valley-ending). #cat: This includes
-	 * two lists of coordinate pairs. The first is #cat: the 8-connected chain of
-	 * points interior to the feature #cat: and are called the feature's "contour
-	 * points". #cat: The second is a list or corresponding points each #cat:
-	 * adjacent to its respective feature contour point in the first #cat: list and
-	 * on the exterior of the feature. These second points #cat: are called the
-	 * feature's "edge points". Input: Contour contains below information contourX -
-	 * x-coord list for feature's contour points contourY - y-coord list for
-	 * feature's contour points contourEx - x-coord list for feature's edge points
-	 * contourEy - y-coord list for feature's edge points
-	 **************************************************************************/
+	/**
+	 * Deallocates the lists used to represent the contour of a minutia feature
+	 * (a ridge or valley ending).
+	 * <p>
+	 * NIST: {@code free_contour()}. Releases the contour-point x/y lists and
+	 * edge-point x/y lists (see {@link #allocateContour(AtomicInteger, int)})
+	 * and sets them to {@code null}. Does nothing if {@code contour} is
+	 * {@code null}.
+	 *
+	 * @param contour the contour whose lists are to be released (may be
+	 *                {@code null})
+	 */
 	public void freeContour(Contour contour) {
 		if (contour != null) {
 			getFree().free(contour.getContourX());
@@ -114,36 +193,44 @@ public class Contour extends MindTct implements IContour {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getHighCurvatureContour - Takes the pixel coordinate of a detected
-	 * #cat: minutia feature point and its corresponding/adjacent edge #cat: pixel
-	 * and attempts to extract a contour of specified length #cat: of the feature's
-	 * edge. The contour is extracted by walking #cat: the feature's edge a
-	 * specified number of steps clockwise and #cat: then counter-clockwise. If a
-	 * loop is detected while #cat: extracting the contour, the contour of the loop
-	 * is returned #cat: with a return code of (LOOP_FOUND). If the process fails
-	 * #cat: to extract a contour of total specified length, then #cat: the returned
-	 * contour length is set to Zero, NO allocated #cat: memory is returned in this
-	 * case, and the return code is set #cat: to Zero. An alternative implementation
-	 * would be to return #cat: the incomplete contour with a return code of
-	 * (INCOMPLETE). #cat: For now, NO allocated contour is returned in this case.
-	 * Input: halfContour - half the length of the extracted contour (full-length
-	 * non-loop contour = (half_contourX2)+1) xPixelLoc - starting x-pixel coord of
-	 * feature (interior to feature) yPixelLoc - starting y-pixel coord of feature
-	 * (interior to feature) xEdgePixelLoc - x-pixel coord of corresponding edge
-	 * pixel (exterior to feature) yEdgePixelLoc - y-pixel coord of corresponding
-	 * edge pixel (exterior to feature) binarizedImageData - binary image data
-	 * (0==while & 1==black) imageWidth - width (in pixels) of image imageHeight -
-	 * height (in pixels) of image Output: Zero - resulting contour was successfully
-	 * extracted or is empty LOOP_FOUND - resulting contour forms a complete loop
-	 * Negative - system error oNoOfContour - number of contour points returned
-	 * Return Code: Contour contains below information ocontourX - x-pixel coords of
-	 * contour (interior to feature) ocontourY - y-pixel coords of contour (interior
-	 * to feature) ocontourEx - x-pixel coords of corresponding edge (exterior to
-	 * feature) ocontourEy - y-pixel coords of corresponding edge (exterior to
-	 * feature)
-	 **************************************************************************/
+	/**
+	 * Takes the pixel coordinate of a detected minutia feature point and its
+	 * corresponding/adjacent edge pixel and attempts to extract a contour of
+	 * specified length of the feature's edge, for high curvature analysis.
+	 * <p>
+	 * NIST: {@code get_high_curvature_contour()}. The contour is extracted by
+	 * walking the feature's edge a specified number of steps clockwise and then
+	 * counter-clockwise. If a loop is detected while extracting the contour, the
+	 * contour of the loop is returned with a return code of
+	 * {@link ILfs#LOOP_FOUND}. If the process fails to extract a contour of total
+	 * specified length, then the returned contour length is set to zero, NO
+	 * contour is returned, and the return code is set to zero. (An alternative
+	 * implementation would be to return the incomplete contour with a return
+	 * code of INCOMPLETE.)
+	 *
+	 * @param ret                output: zero ({@link ILfs#FALSE}) if the
+	 *                           resulting contour was successfully extracted or
+	 *                           is empty; {@link ILfs#LOOP_FOUND} if the
+	 *                           resulting contour forms a complete loop;
+	 *                           negative on system error
+	 * @param oNoOfContour       output: number of contour points returned
+	 * @param halfContour        half the length of the extracted contour
+	 *                           (full-length non-loop contour =
+	 *                           {@code halfContour * 2 + 1})
+	 * @param xPixelLoc          starting x-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param yPixelLoc          starting y-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param xEdgePixelLoc      x-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param yEdgePixelLoc      y-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @return the extracted contour (contour-point and edge-point x/y lists), or
+	 *         {@code null} if no contour was extracted
+	 */
 	@SuppressWarnings({ "java:S3776" })
 	public Contour getHighCurvatureContour(AtomicInteger ret, AtomicInteger oNoOfContour, final int halfContour,
 			final int xPixelLoc, final int yPixelLoc, final int xEdgePixelLoc, final int yEdgePixelLoc,
@@ -335,33 +422,44 @@ public class Contour extends MindTct implements IContour {
 		return contour;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getCenteredContour - Takes the pixel coordinate of a detected #cat:
-	 * minutia feature point and its corresponding/adjacent edge #cat: pixel and
-	 * attempts to extract a contour of specified length #cat: of the feature's
-	 * edge. The contour is extracted by walking #cat: the feature's edge a
-	 * specified number of steps clockwise and #cat: then counter-clockwise. If a
-	 * loop is detected while #cat: extracting the contour, no contour is returned
-	 * with a return #cat: code of (LOOP_FOUND). If the process fails to extract a
-	 * #cat: a complete contour, a code of INCOMPLETE is returned. Input:
-	 * halfContour - half the length of the extracted contour (full-length non-loop
-	 * contour = (half_contourX2)+1) xPixelLoc - starting x-pixel coord of feature
-	 * (interior to feature) yPixelLoc - starting y-pixel coord of feature (interior
-	 * to feature) xEdgePixelLoc - x-pixel coord of corresponding edge pixel
-	 * (exterior to feature) yEdgePixelLoc - y-pixel coord of corresponding edge
-	 * pixel (exterior to feature) binarizedImageData - binary image data (0==while
-	 * & 1==black) imageWidth - width (in pixels) of image imageHeight - height (in
-	 * pixels) of image Output: ret - Zero - resulting contour was successfully
-	 * extracted or is empty - LOOP_FOUND - resulting contour forms a complete loop
-	 * - IGNORE - contour could not be traced due to problem starting conditions -
-	 * INCOMPLETE - resulting contour was not long enough - Negative - system error
-	 * oNoOfContour - number of contour points returned Return Code: Contour
-	 * contains below information ocontourX - x-pixel coords of contour (interior to
-	 * feature) ocontourY - y-pixel coords of contour (interior to feature)
-	 * ocontourEx - x-pixel coords of corresponding edge (exterior to feature)
-	 * ocontourEy - y-pixel coords of corresponding edge (exterior to feature)
-	 **************************************************************************/
+	/**
+	 * Takes the pixel coordinate of a detected minutia feature point and its
+	 * corresponding/adjacent edge pixel and attempts to extract a contour of
+	 * specified length centered on the feature point.
+	 * <p>
+	 * NIST: {@code get_centered_contour()}. The contour is extracted by walking
+	 * the feature's edge a specified number of steps clockwise and then
+	 * counter-clockwise. If a loop is detected while extracting the contour, no
+	 * contour is returned, with a return code of {@link ILfs#LOOP_FOUND}. If the
+	 * process fails to extract a complete contour, a code of
+	 * {@link ILfs#INCOMPLETE} is returned.
+	 *
+	 * @param ret                output: zero ({@link ILfs#FALSE}) if the
+	 *                           resulting contour was successfully extracted or
+	 *                           is empty; {@link ILfs#LOOP_FOUND} if the
+	 *                           resulting contour forms a complete loop;
+	 *                           {@link ILfs#IGNORE} if the contour could not be
+	 *                           traced due to problem starting conditions;
+	 *                           {@link ILfs#INCOMPLETE} if the resulting contour
+	 *                           was not long enough; negative on system error
+	 * @param oNoOfContour       output: number of contour points returned
+	 * @param halfContour        half the length of the extracted contour
+	 *                           (full-length non-loop contour =
+	 *                           {@code halfContour * 2 + 1})
+	 * @param xPixelLoc          starting x-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param yPixelLoc          starting y-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param xEdgePixelLoc      x-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param yEdgePixelLoc      y-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @return the extracted contour (contour-point and edge-point x/y lists), or
+	 *         {@code null} if no contour was extracted
+	 */
 	public Contour getCenteredContour(AtomicInteger ret, AtomicInteger oNoOfContour, final int halfContour,
 			final int xPixelLoc, final int yPixelLoc, final int xEdgePixelLoc, final int yEdgePixelLoc,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
@@ -522,36 +620,53 @@ public class Contour extends MindTct implements IContour {
 		return contour;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: traceContour - Takes the pixel coordinate of a detected minutia #cat:
-	 * feature point and its corresponding/adjacent edge pixel #cat: and extracts a
-	 * contour (up to a specified maximum length) #cat: of the feature's edge in
-	 * either a clockwise or counter- #cat: clockwise direction. A second point is
-	 * specified, such that #cat: if this point is encounted while extracting the
-	 * contour, #cat: it is to be assumed that a loop has been found and a code
-	 * #cat: of (LOOP_FOUND) is returned with the contour. By independently #cat:
-	 * specifying this point, successive calls can be made to #cat: this routine
-	 * from the same starting point, and loops across #cat: successive calls can be
-	 * detected. Input: maxLenOfContour - maximum length of contour to be extracted
-	 * xLoop - x-pixel coord of point, if encountered, triggers LOOP_FOUND yLoop -
-	 * y-pixel coord of point, if encountered, triggers LOOP_FOUND xPixelLoc -
-	 * starting x-pixel coord of feature (interior to feature) yPixelLoc - starting
-	 * y-pixel coord of feature (interior to feature) xEdgePixelLoc - x-pixel coord
-	 * of corresponding edge pixel (exterior to feature) yEdgePixelLoc - y-pixel
-	 * coord of corresponding edge pixel (exterior to feature) scanClock - direction
-	 * in which neighboring pixels are to be scanned for the next contour pixel
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image Output:
-	 * ret - Zero - resulting contour was successfully allocated and extracted -
-	 * LOOP_FOUND - resulting contour forms a complete loop - IGNORE - trace is not
-	 * possible due to state of inputs - Negative - system error oNoOfContour -
-	 * number of contour points returned Return Code: Contour contains below
-	 * information ocontourX - x-pixel coords of contour (interior to feature)
-	 * ocontourY - y-pixel coords of contour (interior to feature) ocontourEx -
-	 * x-pixel coords of corresponding edge (exterior to feature) ocontourEy -
-	 * y-pixel coords of corresponding edge (exterior to feature)
-	 **************************************************************************/
+	/**
+	 * Takes the pixel coordinate of a detected minutia feature point and its
+	 * corresponding/adjacent edge pixel and extracts a contour (up to a specified
+	 * maximum length) of the feature's edge in either a clockwise or
+	 * counter-clockwise direction.
+	 * <p>
+	 * NIST: {@code trace_contour()}. A second point is specified, such that if
+	 * this point is encountered while extracting the contour, it is assumed that
+	 * a loop has been found and a code of {@link ILfs#LOOP_FOUND} is returned
+	 * with the contour. By independently specifying this point, successive calls
+	 * can be made to this routine from the same starting point, and loops across
+	 * successive calls can be detected. The trace stops early (normally) if no
+	 * next contour pixel can be found.
+	 *
+	 * @param ret                output: zero ({@link ILfs#FALSE}) if the
+	 *                           resulting contour was successfully allocated and
+	 *                           extracted; {@link ILfs#LOOP_FOUND} if the
+	 *                           resulting contour forms a complete loop;
+	 *                           {@link ILfs#IGNORE} if the trace is not possible
+	 *                           due to the state of the inputs (feature and edge
+	 *                           pixels have the same value); negative on system
+	 *                           error
+	 * @param oNoOfContour       output: number of contour points returned
+	 * @param maxLenOfContour    maximum length of contour to be extracted
+	 * @param xLoop              x-pixel coord of point which, if encountered,
+	 *                           triggers {@link ILfs#LOOP_FOUND}
+	 * @param yLoop              y-pixel coord of point which, if encountered,
+	 *                           triggers {@link ILfs#LOOP_FOUND}
+	 * @param xPixelLoc          starting x-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param yPixelLoc          starting y-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param xEdgePixelLoc      x-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param yEdgePixelLoc      y-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param scanClock          direction in which neighbouring pixels are to be
+	 *                           scanned for the next contour pixel
+	 *                           ({@link ILfs#SCAN_CLOCKWISE} or
+	 *                           {@link ILfs#SCAN_COUNTER_CLOCKWISE})
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @return the traced contour (allocated to {@code maxLenOfContour} points;
+	 *         only the first {@code oNoOfContour} are valid), or {@code null} if
+	 *         the trace was ignored
+	 */
 	public Contour traceContour(AtomicInteger ret, AtomicInteger oNoOfContour, final int maxLenOfContour,
 			final int xLoop, final int yLoop, final int xPixelLoc, final int yPixelLoc, final int xEdgePixelLoc,
 			final int yEdgePixelLoc, final int scanClock, int[] binarizedImageData, final int imageWidth,
@@ -647,29 +762,37 @@ public class Contour extends MindTct implements IContour {
 		return (contour);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: searchContour - Walk the contour of a minutia feature starting at a
-	 * #cat: specified point on the feature and walking N steps in the #cat:
-	 * specified direction (clockwise or counter-clockwise), looking #cat: for a
-	 * second specified point. In this code, "feature" is #cat: consistently
-	 * referring to either the black interior edge of #cat: a ridge-ending or the
-	 * white interior edge of a valley-ending #cat: (bifurcation). The term "edge of
-	 * the feature" refers to #cat: neighboring pixels on the "exterior" edge of the
-	 * feature. #cat: So "edge" pixels are opposite in color from the interior #cat:
-	 * feature pixels. Input: xPixelSearch - x-pixel coord of point being searched
-	 * for yPixelSearch - y-pixel coord of point being searched for searchLen -
-	 * number of step to walk contour in search xPixelLoc - starting x-pixel coord
-	 * of feature (interior to feature) yPixelLoc - starting y-pixel coord of
-	 * feature (interior to feature) xEdgePixelLoc - x-pixel coord of corresponding
-	 * edge pixel (exterior to feature) yEdgePixelLoc - y-pixel coord of
-	 * corresponding edge pixel (exterior to feature) scanClock - direction in which
-	 * neighbor pixels are to be scanned (clockwise or counter-clockwise)
-	 * binarizedImageData - binary image data (0==while & 1==black) imageWidth -
-	 * width (in pixels) of image imageHeight - height (in pixels) of image Return
-	 * Code: NOT_FOUND - desired pixel not found along N steps of feature's contour
-	 * FOUND - desired pixel WAS found along N steps of feature's contour
-	 **************************************************************************/
+	/**
+	 * Walks the contour of a minutia feature starting at a specified point on
+	 * the feature and walking N steps in the specified direction (clockwise or
+	 * counter-clockwise), looking for a second specified point.
+	 * <p>
+	 * NIST: {@code search_contour()}. In this code, "feature" consistently
+	 * refers to either the black interior edge of a ridge ending or the white
+	 * interior edge of a valley ending (bifurcation). The term "edge of the
+	 * feature" refers to neighbouring pixels on the "exterior" edge of the
+	 * feature, so "edge" pixels are opposite in color from the interior feature
+	 * pixels.
+	 *
+	 * @param xPixelSearch       x-pixel coord of point being searched for
+	 * @param yPixelSearch       y-pixel coord of point being searched for
+	 * @param searchLen          number of steps to walk the contour in search
+	 * @param xPixelLoc          starting x-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param yPixelLoc          starting y-pixel coord of feature (interior to
+	 *                           feature)
+	 * @param xEdgePixelLoc      x-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param yEdgePixelLoc      y-pixel coord of corresponding edge pixel
+	 *                           (exterior to feature)
+	 * @param scanClock          direction in which neighbour pixels are to be
+	 *                           scanned (clockwise or counter-clockwise)
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 * @return {@link ILfs#FOUND} if the desired pixel WAS found along N steps of
+	 *         the feature's contour; {@link ILfs#NOT_FOUND} otherwise
+	 */
 	public int searchContour(final int xPixelSearch, final int yPixelSearch, final int searchLen, final int xPixelLoc,
 			final int yPixelLoc, final int xEdgePixelLoc, final int yEdgePixelLoc, final int scanClock,
 			int[] binarizedImageData, final int imageWidth, final int imageHeight) {
@@ -719,31 +842,44 @@ public class Contour extends MindTct implements IContour {
 		return (ILfs.NOT_FOUND);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: nextContourPixel - Takes a pixel coordinate of a point determined #cat:
-	 * to be on the interior edge of a feature (ridge or valley- #cat: ending), and
-	 * attempts to locate a neighboring pixel on the #cat: feature's contour.
-	 * Neighbors of the current feature pixel #cat: are searched in a specified
-	 * direction (clockwise or counter- #cat: clockwise) and the first pair of
-	 * adjacent/neigboring pixels #cat: found with the first pixel having the color
-	 * of the feature #cat: and the second the opposite color are returned as the
-	 * next #cat: point on the contour. One exception happens when the new #cat:
-	 * point is on an "exposed" corner. Input: currentXPixelLoc - x-pixel coord of
-	 * current point on feature's interior contour currentYPixelLoc - y-pixel coord
-	 * of current point on feature's interior contour currentXEdgePixelLoc - x-pixel
-	 * coord of corresponding edge pixel (exterior to feature) currentYEdgePixelLoc
-	 * - y-pixel coord of corresponding edge pixel (exterior to feature) scanClock -
-	 * direction in which neighboring pixels are to be scanned for the next contour
-	 * pixel binarizedImageData - binary image data (0==while & 1==black) imageWidth
-	 * - width (in pixels) of image imageHeight - height (in pixels) of image
-	 * Output: nextXPixelLoc - x-pixel coord of next point on feature's interior
-	 * contour nextYPixelLoc - y-pixel coord of next point on feature's interior
-	 * contour nextXEdgePixelLoc - x-pixel coord of corresponding edge (exterior to
-	 * feature) nextYEdgePixelLoc - y-pixel coord of corresponding edge (exterior to
-	 * feature) Return Code: TRUE - next contour point found and returned FALSE -
-	 * next contour point NOT found
-	 **************************************************************************/
+	/**
+	 * Takes a pixel coordinate of a point determined to be on the interior edge
+	 * of a feature (ridge or valley ending), and attempts to locate a
+	 * neighbouring pixel on the feature's contour.
+	 * <p>
+	 * NIST: {@code next_contour_pixel()}. Neighbours of the current feature pixel
+	 * are searched in a specified direction (clockwise or counter-clockwise) and
+	 * the first pair of adjacent/neighbouring pixels found with the first pixel
+	 * having the color of the feature and the second the opposite color are
+	 * returned as the next point on the contour. One exception happens when the
+	 * new point is on an "exposed" corner, which is skipped. Failure (no next
+	 * pixel, or a neighbour outside the image) usually means a single isolated
+	 * pixel was found.
+	 *
+	 * @param nextXPixelLoc        output: x-pixel coord of next point on
+	 *                             feature's interior contour
+	 * @param nextYPixelLoc        output: y-pixel coord of next point on
+	 *                             feature's interior contour
+	 * @param nextXEdgePixelLoc    output: x-pixel coord of corresponding edge
+	 *                             (exterior to feature)
+	 * @param nextYEdgePixelLoc    output: y-pixel coord of corresponding edge
+	 *                             (exterior to feature)
+	 * @param currentXPixelLoc     x-pixel coord of current point on feature's
+	 *                             interior contour
+	 * @param currentYPixelLoc     y-pixel coord of current point on feature's
+	 *                             interior contour
+	 * @param currentXEdgePixelLoc x-pixel coord of corresponding edge pixel
+	 *                             (exterior to feature)
+	 * @param currentYEdgePixelLoc y-pixel coord of corresponding edge pixel
+	 *                             (exterior to feature)
+	 * @param scanClock            direction in which neighbouring pixels are to
+	 *                             be scanned for the next contour pixel
+	 * @param binarizedImageData   binary image data (0 = white, 1 = black)
+	 * @param imageWidth           width (in pixels) of image
+	 * @param imageHeight          height (in pixels) of image
+	 * @return {@link ILfs#TRUE} if the next contour point was found and returned;
+	 *         {@link ILfs#FALSE} if the next contour point was NOT found
+	 */
 	@SuppressWarnings({ "java:S3776" })
 	public int nextContourPixel(AtomicInteger nextXPixelLoc, AtomicInteger nextYPixelLoc,
 			AtomicInteger nextXEdgePixelLoc, AtomicInteger nextYEdgePixelLoc, final int currentXPixelLoc,
@@ -875,18 +1011,24 @@ public class Contour extends MindTct implements IContour {
 		return ILfs.FALSE;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: startScanNbr - Takes a two pixel coordinates that are either #cat:
-	 * aligned north-to-south or east-to-west, and returns the #cat: position the
-	 * second pixel is in realtionship to the first. #cat: The positions returned
-	 * are based on 8-connectedness. #cat: NOTE, this routine does NOT account for
-	 * diagonal positions. Input: previousXPixelLoc - x-coord of first point
-	 * previousYPixelLoc - y-coord of first point nextXPixelLoc - x-coord of second
-	 * point nextYPixelLoc - y-coord of second point Return Code: NORTH - second
-	 * pixel above first SOUTH - second pixel below first EAST - second pixel right
-	 * of first WEST - second pixel left of first
-	 **************************************************************************/
+	/**
+	 * Takes two pixel coordinates that are either aligned north-to-south or
+	 * east-to-west, and returns the position the second pixel is in relationship
+	 * to the first.
+	 * <p>
+	 * NIST: {@code start_scan_nbr()}. The positions returned are based on
+	 * 8-connectedness (neighbour indices as in {@link Globals#getNbr8Dx()}).
+	 * NOTE: this routine does NOT account for diagonal positions.
+	 *
+	 * @param previousXPixelLoc x-coord of first point
+	 * @param previousYPixelLoc y-coord of first point
+	 * @param nextXPixelLoc     x-coord of second point
+	 * @param nextYPixelLoc     y-coord of second point
+	 * @return {@link ILfs#NORTH} if the second pixel is above the first;
+	 *         {@link ILfs#SOUTH} if below; {@link ILfs#EAST} if right of the
+	 *         first; {@link ILfs#WEST} if left of the first;
+	 *         {@link ILfs#INVALID_DIR} (-1) otherwise (should never happen)
+	 */
 	public int startScanNbr(final int previousXPixelLoc, final int previousYPixelLoc, final int nextXPixelLoc,
 			final int nextYPixelLoc) {
 		if ((previousXPixelLoc == nextXPixelLoc) && (nextYPixelLoc > previousYPixelLoc)) {
@@ -904,14 +1046,18 @@ public class Contour extends MindTct implements IContour {
 		return (ILfs.INVALID_DIR); // -1
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: nextScanNbr - Advances the given 8-connected neighbor index #cat: on
-	 * location in the specifiec direction (clockwise or #cat: counter-clockwise).
-	 * Input: nbrIndex - current 8-connected neighbor index scanClock - direction in
-	 * which the neighbor index is to be advanced Return Code: Next neighbor -
-	 * 8-connected index of next neighbor
-	 **************************************************************************/
+	/**
+	 * Advances the given 8-connected neighbour index one location in the
+	 * specified direction (clockwise or counter-clockwise), wrapping around 0..7.
+	 * <p>
+	 * NIST: {@code next_scan_nbr()}.
+	 *
+	 * @param nbrIndex  current 8-connected neighbour index
+	 * @param scanClock direction in which the neighbour index is to be advanced
+	 *                  ({@link ILfs#SCAN_CLOCKWISE} or any other value for
+	 *                  counter-clockwise)
+	 * @return the 8-connected index of the next neighbour
+	 */
 	public int nextScanNbr(final int nbrIndex, final int scanClock) {
 		int nextNeighborIndex;
 
@@ -933,26 +1079,33 @@ public class Contour extends MindTct implements IContour {
 		return (nextNeighborIndex);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: min_contour_theta - Takes a contour list and analyzes it locating the
-	 * #cat: point at which the contour has highest curvature #cat: (or minimum
-	 * interior angle). The angle of curvature is #cat: computed by searching a
-	 * majority of points on the contour. #cat: At each of these points, a left and
-	 * right segment (or edge) #cat: are extended out N number of pixels from the
-	 * center point #cat: on the contour. The angle is formed between the straight
-	 * line #cat: connecting the center point to the end point on the left edge
-	 * #cat: and the line connecting the center point to the end of the #cat: right
-	 * edge. The point of highest curvature is determined #cat: by locating the
-	 * where the minimum of these angles occurs. Input: angleEdge - length of the
-	 * left and right edges extending from a common/centered pixel on the contour
-	 * contourX - x-coord list for contour points contourY - y-coord list for
-	 * contour points noOfContour - number of points in contour Output:
-	 * oMinContourPoint - index of contour point where minimum occurred
-	 * oMinThetaAngle - minimum angle found along the contour Return Code: Zero -
-	 * minimum angle successfully located IGNORE - ignore the contour Negative -
-	 * system error
-	 **************************************************************************/
+	/**
+	 * Takes a contour list and analyzes it, locating the point at which the
+	 * contour has highest curvature (or minimum interior angle).
+	 * <p>
+	 * NIST: {@code min_contour_theta()}. The angle of curvature is computed by
+	 * searching a majority of points on the contour. At each of these points, a
+	 * left and right segment (or edge) are extended out N pixels from the center
+	 * point on the contour. The angle is formed between the straight line
+	 * connecting the center point to the end point on the left edge and the line
+	 * connecting the center point to the end of the right edge. The point of
+	 * highest curvature is determined by locating where the minimum of these
+	 * angles occurs. If the contour is perfectly flat, the middle point is
+	 * returned.
+	 *
+	 * @param oMinContourPoint output: index of contour point where the minimum
+	 *                         occurred
+	 * @param oMinThetaAngle   output: minimum angle (in radians) found along the
+	 *                         contour
+	 * @param angleEdge        length of the left and right edges extending from a
+	 *                         common/centered pixel on the contour
+	 * @param contourX         x-coord list for contour points
+	 * @param contourY         y-coord list for contour points
+	 * @param noOfContour      number of points in contour
+	 * @return zero ({@link ILfs#FALSE}) if the minimum angle was successfully
+	 *         located; {@link ILfs#IGNORE} if the contour is too short and should
+	 *         be ignored (negative would indicate a system error)
+	 */
 	public int minContourTheta(AtomicInteger oMinContourPoint, AtomicReference<Double> oMinThetaAngle,
 			final int angleEdge, AtomicIntegerArray contourX, AtomicIntegerArray contourY, final int noOfContour) {
 		int pointLeft;
@@ -1028,15 +1181,19 @@ public class Contour extends MindTct implements IContour {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: contourLimits - Determines the X and Y coordinate limits of the #cat:
-	 * given contour list. Input: contourX - x-coord list for contour points
-	 * contourY - y-coord list for contour points noOfContour - number of points in
-	 * contour Output: xMin - left-most x-coord in contour yMin - top-most y-coord
-	 * in contour xMax - right-most x-coord in contour yMax - bottom-most y-coord in
-	 * contour
-	 **************************************************************************/
+	/**
+	 * Determines the X and Y coordinate limits of the given contour list.
+	 * <p>
+	 * NIST: {@code contour_limits()}.
+	 *
+	 * @param xMin        output: left-most x-coord in contour
+	 * @param yMin        output: top-most y-coord in contour
+	 * @param xMax        output: right-most x-coord in contour
+	 * @param yMax        output: bottom-most y-coord in contour
+	 * @param contourX    x-coord list for contour points
+	 * @param contourY    y-coord list for contour points
+	 * @param noOfContour number of points in contour (must be positive)
+	 */
 	public void contourLimits(AtomicInteger xMin, AtomicInteger yMin, AtomicInteger xMax, AtomicInteger yMax,
 			AtomicIntegerArray contourX, AtomicIntegerArray contourY, final int noOfContour) {
 		/* Find the minimum x-coord from the list of contour points. */
@@ -1049,24 +1206,25 @@ public class Contour extends MindTct implements IContour {
 		yMax.set(getLfsUtil().maxValue(contourY, noOfContour));
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: fixEdgePixelPair - Takes a pair of pixel points with the first #cat:
-	 * pixel on a feature and the second adjacent and off the feature, #cat:
-	 * determines if the pair neighbor diagonally. If they do, their #cat: locations
-	 * are adjusted so that the resulting pair retains the #cat: same pixel values,
-	 * but are neighboring either to the N,S,E or W. #cat: This routine is needed in
-	 * order to prepare the pixel pair for #cat: contour tracing. Input:
-	 * featureXPixel - pointer to x-pixel coord on feature featureYPixel - pointer
-	 * to y-pixel coord on feature featureEdgeXPixel - pointer to x-pixel coord on
-	 * edge of feature featureEdgeYPixel - pointer to y-pixel coord on edge of
-	 * feature binarizedImageData - binary image data (0==while & 1==black)
-	 * imageWidth - width (in pixels) of image imageHeight - height (in pixels) of
-	 * image Output: featureXPixel - pointer to resulting x-pixel coord on feature
-	 * featureYPixel - pointer to resulting y-pixel coord on feature
-	 * featureEdgeXPixel - pointer to resulting x-pixel coord on edge of feature
-	 * featureEdgeYPixel - pointer to resulting y-pixel coord on edge of feature
-	 **************************************************************************/
+	/**
+	 * Takes a pair of pixel points, with the first pixel on a feature and the
+	 * second adjacent and off the feature, and determines whether the pair
+	 * neighbour diagonally.
+	 * <p>
+	 * NIST: {@code fix_edge_pixel_pair()}. If they do, their locations are
+	 * adjusted so that the resulting pair retains the same pixel values but are
+	 * neighbouring either to the N, S, E or W. This routine is needed in order to
+	 * prepare the pixel pair for contour tracing. If the pair is not diagonal,
+	 * the inputs are left unchanged.
+	 *
+	 * @param featureXPixel      input/output: x-pixel coord on feature
+	 * @param featureYPixel      input/output: y-pixel coord on feature
+	 * @param featureEdgeXPixel  input/output: x-pixel coord on edge of feature
+	 * @param featureEdgeYPixel  input/output: y-pixel coord on edge of feature
+	 * @param binarizedImageData binary image data (0 = white, 1 = black)
+	 * @param imageWidth         width (in pixels) of image
+	 * @param imageHeight        height (in pixels) of image
+	 */
 	public void fixEdgePixelPair(AtomicInteger featureXPixel, AtomicInteger featureYPixel,
 			AtomicInteger featureEdgeXPixel, AtomicInteger featureEdgeYPixel, int[] binarizedImageData,
 			final int imageWidth, final int imageHeight) {
@@ -1149,46 +1307,102 @@ public class Contour extends MindTct implements IContour {
 		/* Otherwise, nothing has changed. */
 	}
 
+	/**
+	 * Returns the x-pixel coords of the contour points (interior to feature).
+	 *
+	 * @return the contour-point x list, or {@code null} if freed/unallocated
+	 */
 	public AtomicIntegerArray getContourX() {
 		return contourX;
 	}
 
+	/**
+	 * Sets the x-pixel coords of the contour points (interior to feature).
+	 *
+	 * @param contourX the contour-point x list (stored by reference)
+	 */
 	public void setContourX(AtomicIntegerArray contourX) {
 		this.contourX = contourX;
 	}
 
+	/**
+	 * Returns the y-pixel coords of the contour points (interior to feature).
+	 *
+	 * @return the contour-point y list, or {@code null} if freed/unallocated
+	 */
 	public AtomicIntegerArray getContourY() {
 		return contourY;
 	}
 
+	/**
+	 * Sets the y-pixel coords of the contour points (interior to feature).
+	 *
+	 * @param contourY the contour-point y list (stored by reference)
+	 */
 	public void setContourY(AtomicIntegerArray contourY) {
 		this.contourY = contourY;
 	}
 
+	/**
+	 * Returns the x-pixel coords of the edge points (exterior to feature).
+	 *
+	 * @return the edge-point x list, or {@code null} if freed/unallocated
+	 */
 	public AtomicIntegerArray getContourEx() {
 		return contourEx;
 	}
 
+	/**
+	 * Sets the x-pixel coords of the edge points (exterior to feature).
+	 *
+	 * @param contourEx the edge-point x list (stored by reference)
+	 */
 	public void setContourEx(AtomicIntegerArray contourEx) {
 		this.contourEx = contourEx;
 	}
 
+	/**
+	 * Returns the y-pixel coords of the edge points (exterior to feature).
+	 *
+	 * @return the edge-point y list, or {@code null} if freed/unallocated
+	 */
 	public AtomicIntegerArray getContourEy() {
 		return contourEy;
 	}
 
+	/**
+	 * Sets the y-pixel coords of the edge points (exterior to feature).
+	 *
+	 * @param contourEy the edge-point y list (stored by reference)
+	 */
 	public void setContourEy(AtomicIntegerArray contourEy) {
 		this.contourEy = contourEy;
 	}
 
+	/**
+	 * Returns the allocated number of items in each coordinate list.
+	 *
+	 * @return the allocated contour length
+	 */
 	public int getNoOfContour() {
 		return noOfContour;
 	}
 
+	/**
+	 * Sets the allocated number of items in each coordinate list.
+	 *
+	 * @param noOfContour the allocated contour length
+	 */
 	public void setNoOfcontour(int noOfContour) {
 		this.noOfContour = noOfContour;
 	}
 
+	/**
+	 * Returns a debug representation of this contour, listing its four
+	 * coordinate lists and allocated length.
+	 *
+	 * @return a string describing this contour
+	 */
 	@Override
 	public String toString() {
 		return "Contour [contourX=" + contourX + ", contourY=" + contourY + ", contourEx=" + contourEx + ", contourEy="

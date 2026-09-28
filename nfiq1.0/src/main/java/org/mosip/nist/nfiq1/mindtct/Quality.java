@@ -12,14 +12,44 @@ import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Block quality map generation and minutia reliability assignment for MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code quality.c}. Combines the direction, low contrast,
+ * low ridge flow and high curvature block maps into a single quality map with
+ * five levels (0 = unusable .. 4 = good), and then assigns each detected
+ * minutia a reliability value derived from that map and, optionally, from the
+ * grayscale statistics of the minutia's pixel neighbourhood. NFIQ 1.0 uses
+ * the quality map and minutia reliabilities as inputs to its feature vector.
+ * <p>
+ * Implemented as a lazily created singleton, but unlike most MINDTCT helpers it
+ * holds mutable state (the current quality map and its dimensions) that is
+ * overwritten by {@link #generateQualityMap(Maps)}. It is therefore <b>not</b>
+ * thread-safe: concurrent quality computations must be serialized externally.
+ */
 public class Quality extends MindTct implements IQuality {
+	/** SLF4J logger for error reporting in this class. */
 	private static final Logger logger = LoggerFactory.getLogger(Quality.class);
+	/**
+	 * Lazily created singleton instance, see {@link #getInstance()} and
+	 * {@link #getInstance(int, int)}.
+	 */
 	private static Quality instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 * The quality map is left unallocated until
+	 * {@link #generateQualityMap(Maps)} is called.
+	 */
 	private Quality() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Quality} instance
+	 */
 	public static synchronized Quality getInstance() {
 		if (instance == null) {
 			instance = new Quality();
@@ -27,6 +57,19 @@ public class Quality extends MindTct implements IQuality {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use with a
+	 * pre-allocated quality map of the given dimensions.
+	 * <p>
+	 * If the singleton already exists, the arguments are ignored and the
+	 * existing instance is returned unchanged.
+	 *
+	 * @param mappedImageWidth  number of blocks horizontally in the padded input
+	 *                          image
+	 * @param mappedImageHeight number of blocks vertically in the padded input
+	 *                          image
+	 * @return the singleton {@code Quality} instance
+	 */
 	public static synchronized Quality getInstance(int mappedImageWidth, int mappedImageHeight) {
 		if (instance == null) {
 			instance = new Quality(mappedImageWidth, mappedImageHeight);
@@ -34,20 +77,46 @@ public class Quality extends MindTct implements IQuality {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (rounding utilities).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release buffers.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Current block quality map (row-major, {@code mappedImageWidth *
+	 * mappedImageHeight} entries, values 0..4), produced by
+	 * {@link #generateQualityMap(Maps)}.
+	 */
 	private AtomicIntegerArray qualityMap;
 	// mappedImageWidth - number of blocks horizontally in the padded input image
 	// mh - number of blocks vertically in the padded input image
+	/** Width of the quality map, in blocks (number of blocks horizontally). */
 	private int mappedImageWidth;
+	/** Height of the quality map, in blocks (number of blocks vertically). */
 	private int mappedImageHeight;
 
+	/**
+	 * Private constructor that pre-allocates a zeroed quality map of the given
+	 * dimensions; use {@link #getInstance(int, int)} to obtain the singleton.
+	 *
+	 * @param mappedImageWidth  number of blocks horizontally in the padded input
+	 *                          image
+	 * @param mappedImageHeight number of blocks vertically in the padded input
+	 *                          image
+	 */
 	private Quality(int mappedImageWidth, int mappedImageHeight) {
 		super();
 		/* Compute total number of blocks in map */
@@ -56,26 +125,36 @@ public class Quality extends MindTct implements IQuality {
 		this.qualityMap = new AtomicIntegerArray(this.mappedImageWidth * this.mappedImageHeight);
 	}
 
-	/***********************************************************************
-	 ************************************************************************
-	 * #cat: generateQualityMap - Takes a direction map, low contrast map, low ridge
-	 * #cat: flow map, and high curvature map, and combines them #cat: into a single
-	 * map containing 5 levels of decreasing #cat: quality. This is done through a
-	 * set of heuristics. Set quality of 0(unusable)..4(good) (I call these grades
-	 * A..F) 0/F: low contrast OR no direction 1/D: low flow OR high curve (with low
-	 * contrast OR no direction neighbor) (or within NEIGHBOR_DELTA of edge) 2/C:
-	 * low flow OR high curve (or good quality with low contrast/no direction
-	 * neighbor) 3/B: good quality with low flow / high curve neighbor 4/A: good
-	 * quality (none of the above) Generally, the features in A/B quality are
-	 * useful, the C/D quality ones are not. Input: map - contain all below
-	 * //direction_map - map with blocks assigned dominant ridge flow direction
-	 * //low_contrast_map - map with blocks flagged as low contrast //low_flow_map -
-	 * map with blocks flagged as low ridge flow //high_curve_map - map with blocks
-	 * flagged as high curvature //map_w - width (in blocks) of the maps //map_h -
-	 * height (in blocks) of the maps Output: //oqmap - points to new quality map //
-	 * get it seperatly after call made Return Code: Zero - successful completion
-	 * Negative - system error
-	 ************************************************************************/
+	/**
+	 * Takes a direction map, low contrast map, low ridge flow map and high
+	 * curvature map, and combines them into a single map containing 5 levels of
+	 * decreasing quality.
+	 * <p>
+	 * NIST: {@code gen_quality_map()}. This is done through a set of heuristics
+	 * that set the quality of each block to 0 (unusable) .. 4 (good), also
+	 * referred to as grades A..F:
+	 * <ul>
+	 * <li>0/F: low contrast OR no direction</li>
+	 * <li>1/D: low flow OR high curve (with low contrast OR no direction
+	 * neighbour), or within {@link ILfs#NEIGHBOR_DELTA} of the edge</li>
+	 * <li>2/C: low flow OR high curve (or good quality with low contrast/no
+	 * direction neighbour)</li>
+	 * <li>3/B: good quality with low flow / high curve neighbour</li>
+	 * <li>4/A: good quality (none of the above)</li>
+	 * </ul>
+	 * Generally, the features in A/B quality are useful, the C/D quality ones are
+	 * not.
+	 * <p>
+	 * Side effects: resets this instance's map dimensions from {@code map} and
+	 * allocates a new quality map, retrievable afterwards via
+	 * {@link #getQualityMap()}.
+	 *
+	 * @param map container holding the direction map (blocks assigned dominant
+	 *            ridge flow direction), low contrast map, low ridge flow map,
+	 *            high curvature map, and the width/height (in blocks) of the maps
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int generateQualityMap(Maps map) {
 		int compX;
 		int compY;
@@ -159,20 +238,32 @@ public class Quality extends MindTct implements IQuality {
 		return ILfs.FALSE;
 	}
 
-	/***********************************************************************
-	 ************************************************************************
-	 * #cat: combinedMinutiaQuality - Combines quality measures derived from #cat:
-	 * the quality map and neighboring pixel statistics to #cat: infer a reliability
-	 * measure on the scale [0...1]. Input: oMinutiae - structure contining the
-	 * detected minutia map - contain all below //quality_map - map with blocks
-	 * assigned 1 of 5 quality levels //map_w - width (in blocks) of the map //map_h
-	 * - height (in blocks) of the map blocksize - size (in pixels) of each block in
-	 * the map imageData - 8-bit grayscale fingerprint image imageWidth - width (in
-	 * pixels) of the image imageHeight - height (in pixels) of the image imageDepth
-	 * - depth (in pixels) of the image imagePPI - scan resolution of the image in
-	 * pixels/mm Output: minutiae - updated reliability members Return Code: Zero -
-	 * successful completion Negative - system error
-	 ************************************************************************/
+	/**
+	 * Combines quality measures derived from the quality map and neighbouring
+	 * pixel statistics to infer a reliability measure on the scale [0...1].
+	 * <p>
+	 * NIST: {@code combined_minutia_quality()}. The block quality map held by
+	 * this instance (see {@link #generateQualityMap(Maps)}) is expanded to a
+	 * pixel map; for each minutia the grayscale reliability of its neighbourhood
+	 * (radius {@link ILfs#RADIUS_MM} times {@code imagePPI}) is combined with its
+	 * quality level: A (4) maps to [50..99]%, B (3) to [25..49]%, C (2) to
+	 * [10..24]%, D (1) to [5..9]% and E (0) to 1%.
+	 *
+	 * @param oMinutiae   input/output: structure containing the detected
+	 *                    minutiae; each minutia's reliability member is updated
+	 * @param map         map container used to pixelize this instance's quality
+	 *                    map
+	 * @param blocksize   size (in pixels) of each block in the map
+	 * @param imageData   8-bit grayscale fingerprint image
+	 * @param imageWidth  width (in pixels) of the image
+	 * @param imageHeight height (in pixels) of the image
+	 * @param imageDepth  depth (in bits per pixel) of the image; must be
+	 *                    {@link ILfs#IMAGE_DEPTH} (8)
+	 * @param imagePPI    scan resolution of the image in pixels/mm
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error: -2 image is not 8-bit, -3 unexpected quality map
+	 *         value, or the error code returned by map pixelization
+	 */
 	public int combinedMinutiaQuality(AtomicReference<Minutiae> oMinutiae, Maps map, final int blocksize,
 			int[] imageData, final int imageWidth, final int imageHeight, final int imageDepth, final double imagePPI) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -256,20 +347,25 @@ public class Quality extends MindTct implements IQuality {
 		return (ILfs.FALSE);
 	}
 
-	/***********************************************************************
-	 ************************************************************************
-	 * #cat: grayscaleReliability - Given a minutia point, computes a reliability
-	 * #cat: measure from the stdev and mean of its pixel neighborhood.
-	 * GrayScaleReliability - reasonable reliability heuristic, returns 0.0 .. 1.0
-	 * based on stdev and Mean of a localized histogram where "ideal" stdev is >=64;
-	 * "ideal" Mean is 127. In a 1 ridge radius (11 pixels), if the bytevalue (shade
-	 * of gray) in the image has a stdev of >= 64 & a mean of 127, returns 1.0 (well
-	 * defined light & dark areas in equal proportions). Input: minutia - structure
-	 * containing detected minutia imageData - 8-bit grayscale fingerprint image
-	 * imageWidth - width (in pixels) of the image imageHeight - height (in pixels)
-	 * of the image radiusPixel - pixel radius of surrounding neighborhood Return
-	 * Value: reliability - computed reliability measure
-	 ************************************************************************/
+	/**
+	 * Given a minutia point, computes a reliability measure from the standard
+	 * deviation and mean of its pixel neighbourhood.
+	 * <p>
+	 * NIST: {@code grayscale_reliability()}. A reasonable reliability heuristic
+	 * returning 0.0 .. 1.0 based on the stdev and mean of a localized histogram,
+	 * where the "ideal" stdev is {@code >= 64} ({@link ILfs#IDEALSTDEV}) and the
+	 * "ideal" mean is 127 ({@link ILfs#IDEALMEAN}). In a one ridge radius (11
+	 * pixels), if the byte value (shade of gray) in the image has a stdev of
+	 * {@code >= 64} and a mean of 127, returns 1.0 (well defined light and dark
+	 * areas in equal proportions).
+	 *
+	 * @param minutia     structure containing the detected minutia
+	 * @param imageData   8-bit grayscale fingerprint image
+	 * @param imageWidth  width (in pixels) of the image
+	 * @param imageHeight height (in pixels) of the image
+	 * @param radiusPixel pixel radius of the surrounding neighbourhood
+	 * @return the computed reliability measure (0.0 .. 1.0)
+	 */
 	public double grayscaleReliability(Minutia minutia, int[] imageData, final int imageWidth, final int imageHeight,
 			final int radiusPixel) {
 		AtomicReference<Double> mean = new AtomicReference<>(0.0), stdev = new AtomicReference<>(0.0);
@@ -282,16 +378,23 @@ public class Quality extends MindTct implements IQuality {
 		return (reliability);
 	}
 
-	/***********************************************************************
-	 ************************************************************************
-	 * #cat: getNeighborhoodStats - Given a minutia point, computes the mean #cat:
-	 * and stdev of the 8-bit grayscale pixels values in a #cat: surrounding
-	 * neighborhood with specified radius. Input: minutia - structure containing
-	 * detected minutia imageData - 8-bit grayscale fingerprint image imageWidth -
-	 * width (in pixels) of the image imageHeight - height (in pixels) of the image
-	 * radiusPixel - pixel radius of surrounding neighborhood Output: oMean - mean
-	 * of neighboring pixels oStDev - standard deviation of neighboring pixels
-	 ************************************************************************/
+	/**
+	 * Given a minutia point, computes the mean and standard deviation of the
+	 * 8-bit grayscale pixel values in a surrounding square neighbourhood with the
+	 * specified radius.
+	 * <p>
+	 * NIST: {@code get_neighborhood_stats()}. If the minutia lies within
+	 * {@code radiusPixel} of the image border (or the neighbourhood is empty),
+	 * both outputs are set to 0.0, which yields zero reliability.
+	 *
+	 * @param oMean       output: mean of neighbouring pixels
+	 * @param oStDev      output: standard deviation of neighbouring pixels
+	 * @param minutia     structure containing the detected minutia
+	 * @param imageData   8-bit grayscale fingerprint image
+	 * @param imageWidth  width (in pixels) of the image
+	 * @param imageHeight height (in pixels) of the image
+	 * @param radiusPixel pixel radius of the surrounding neighbourhood
+	 */
 	public void getNeighborhoodStats(AtomicReference<Double> oMean, AtomicReference<Double> oStDev, Minutia minutia,
 			int[] imageData, final int imageWidth, final int imageHeight, final int radiusPixel) {
 		int i;
@@ -354,17 +457,25 @@ public class Quality extends MindTct implements IQuality {
 		oStDev.set(Math.sqrt((sumXX / (double) n) - (oMean.get() * oMean.get())));
 	}
 
-	/***********************************************************************
-	 ************************************************************************
-	 * #cat: reliabilityFromQualityMap - Takes a set of minutiae and assigns #cat:
-	 * each one a reliability measure based on 1 of 5 possible #cat: quality levels
-	 * from its location in a quality map. Input: minutiae - structure contining the
-	 * detected minutia map(quality Map) - map with blocks assigned 1 of 5 quality
-	 * levels //mappedImageWidth - width (in blocks) of the map //map_h - height (in
-	 * blocks) of the map blocksize - size (in pixels) of each block in the map
-	 * Output: minutiae - updated reliability members Return Code: Zero - successful
-	 * completion Negative - system error
-	 ************************************************************************/
+	/**
+	 * Takes a set of minutiae and assigns each one a reliability measure based on
+	 * one of 5 possible quality levels from its location in the quality map.
+	 * <p>
+	 * NIST: {@code reliability_fr_quality_map()}. The block quality map held by
+	 * this instance is expanded to a pixel map and quality levels 0..4 are mapped
+	 * to reliabilities 0.0, 0.25, 0.50, 0.75 and 0.99 respectively.
+	 *
+	 * @param minutiae    input/output: structure containing the detected
+	 *                    minutiae; each minutia's reliability member is updated
+	 * @param map         map container used to pixelize this instance's quality
+	 *                    map (blocks assigned one of 5 quality levels)
+	 * @param imageWidth  width (in pixels) of the image
+	 * @param imageHeight height (in pixels) of the image
+	 * @param blocksize   size (in pixels) of each block in the map
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error: -2 unexpected quality value, or the error code
+	 *         returned by map pixelization
+	 */
 	public int reliabilityFromQualityMap(Minutiae minutiae, Maps map, final int imageWidth, final int imageHeight,
 			final int blocksize) {
 		AtomicInteger ret = new AtomicInteger(0);
@@ -419,26 +530,57 @@ public class Quality extends MindTct implements IQuality {
 		return (ILfs.FALSE);
 	}
 
+	/**
+	 * Returns the current block quality map.
+	 *
+	 * @return the quality map (values 0..4, row-major), or {@code null} if not
+	 *         yet generated
+	 */
 	public AtomicIntegerArray getQualityMap() {
 		return qualityMap;
 	}
 
+	/**
+	 * Replaces the current block quality map.
+	 *
+	 * @param qualityMap new quality map (stored by reference)
+	 */
 	public void setQualityMap(AtomicIntegerArray qualityMap) {
 		this.qualityMap = qualityMap;
 	}
 
+	/**
+	 * Returns the width of the quality map.
+	 *
+	 * @return the map width, in blocks
+	 */
 	public int getMappedImageWidth() {
 		return mappedImageWidth;
 	}
 
+	/**
+	 * Sets the width of the quality map.
+	 *
+	 * @param mappedImageWidth the map width, in blocks
+	 */
 	public void setMappedImageWidth(int mappedImageWidth) {
 		this.mappedImageWidth = mappedImageWidth;
 	}
 
+	/**
+	 * Returns the height of the quality map.
+	 *
+	 * @return the map height, in blocks
+	 */
 	public int getMappedImageHeight() {
 		return mappedImageHeight;
 	}
 
+	/**
+	 * Sets the height of the quality map.
+	 *
+	 * @param mappedImageHeight the map height, in blocks
+	 */
 	public void setMappedImageHeight(int mappedImageHeight) {
 		this.mappedImageHeight = mappedImageHeight;
 	}

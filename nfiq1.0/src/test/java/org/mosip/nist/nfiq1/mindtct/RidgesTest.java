@@ -7,12 +7,14 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
+import org.mosip.nist.nfiq1.Nist;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.LfsParams;
 import org.mosip.nist.nfiq1.common.ILfs.Minutia;
@@ -20,6 +22,7 @@ import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -873,5 +876,197 @@ public class RidgesTest {
 
             assertEquals(ILfs.ERROR_CODE_301, result);
         }
+    }
+
+    private final boolean initialShowLogs = Nist.isShowLogs();
+
+    /**
+     * Restores the global log flag that some tests toggle.
+     */
+    @AfterEach
+    public void restoreShowLogs() {
+        Nist.setShowLogs(initialShowLogs);
+    }
+
+    /**
+     * Verifies that countMinutiaeRidges stops at the first minutia whose ridge counting fails.
+     */
+    @Test
+    public void countMinutiaeRidgesPropagatesPerMinutiaError() {
+        Ridges spyRidges = Mockito.spy(ridges);
+        Mockito.doReturn(-71).when(spyRidges).countMinutiaRidges(anyInt(), any(), any(), anyInt(), anyInt(), any());
+
+        assertEquals(-71, spyRidges.countMinutiaeRidges(realMinutiae(new int[][] { { 1, 1 }, { 5, 5 }, { 9, 9 } }),
+                new int[100], 10, 10, Globals.getInstance().getLfsParams()));
+        Mockito.verify(spyRidges).countMinutiaRidges(Mockito.eq(0), any(), any(), anyInt(), anyInt(), any());
+    }
+
+    /**
+     * Verifies that the last minutia in column order has no neighbors, so nothing is assigned to it.
+     */
+    @Test
+    public void countMinutiaRidgesWithoutNeighborsLeavesMinutiaUntouched() {
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 1, 1 }, { 5, 5 } });
+
+        assertEquals(ILfs.FALSE, ridges.countMinutiaRidges(1, minutiae, new int[100], 10, 10,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(0, minutiae.get().getList().get(1).getNumNbrs());
+        assertNull(minutiae.get().getList().get(1).getNbrs());
+    }
+
+    /**
+     * Verifies that countMinutiaRidges propagates neighbor sorting and ridge counting errors
+     * without assigning neighbors to the minutia.
+     */
+    @Test
+    public void countMinutiaRidgesPropagatesSortAndRidgeCountErrors() {
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 1, 1 }, { 5, 5 } });
+
+        Ridges sortFails = Mockito.spy(ridges);
+        Mockito.doReturn(-72).when(sortFails).sortNeighbors(any(), anyInt(), anyInt(), any());
+        assertEquals(-72, sortFails.countMinutiaRidges(0, minutiae, new int[100], 10, 10,
+                Globals.getInstance().getLfsParams()));
+
+        Ridges countFails = Mockito.spy(ridges);
+        Mockito.doReturn(-73).when(countFails).ridgeCount(anyInt(), anyInt(), any(), any(), anyInt(), anyInt(),
+                any());
+        assertEquals(-73, countFails.countMinutiaRidges(0, minutiae, new int[100], 10, 10,
+                Globals.getInstance().getLfsParams()));
+        assertEquals(0, minutiae.get().getList().get(0).getNumNbrs());
+    }
+
+    /**
+     * Verifies that findNeighbors stops scanning once the list is full and the next minutia is
+     * farther along x than the farthest stored neighbor, and propagates update errors.
+     */
+    @Test
+    public void findNeighborsStopsWhenFullAndPropagatesUpdateError() {
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 0, 0 }, { 1, 0 }, { 50, 0 } });
+        AtomicIntegerArray nbrList = new AtomicIntegerArray(1);
+        AtomicInteger nbrCount = new AtomicInteger();
+
+        assertEquals(ILfs.FALSE, ridges.findNeighbors(nbrList, nbrCount, 1, 0, minutiae));
+        assertEquals(1, nbrCount.get());
+        assertEquals(1, nbrList.get(0));
+
+        Ridges spyRidges = Mockito.spy(ridges);
+        Mockito.doReturn(-74).when(spyRidges).updateNbrDists(any(), any(), any(), anyInt(), anyInt(), anyInt(),
+                any());
+        assertEquals(-74, spyRidges.findNeighbors(new AtomicIntegerArray(1), new AtomicInteger(), 1, 0, minutiae));
+    }
+
+    /**
+     * Verifies that updateNbrDists maps an insertion failure to ERROR_CODE_471.
+     */
+    @Test
+    public void updateNbrDistsMapsInsertFailure() {
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 0, 0 }, { 3, 4 } });
+        Ridges spyRidges = Mockito.spy(ridges);
+        Mockito.doReturn(-1).when(spyRidges).insertNeighbor(anyInt(), anyInt(), anyDouble(), any(), any(), any(),
+                anyInt());
+
+        assertEquals(ILfs.ERROR_CODE_471, spyRidges.updateNbrDists(new AtomicIntegerArray(2),
+                new AtomicReferenceArray<>(2), new AtomicInteger(0), 2, 0, 1, minutiae));
+    }
+
+    /**
+     * Verifies that insertNeighbor rejects a position at the maximum list length even when it
+     * directly follows the stored neighbors.
+     */
+    @Test
+    public void insertNeighborRejectsPositionAtMaximum() {
+        AtomicIntegerArray nbrList = new AtomicIntegerArray(new int[] { 4, 7 });
+        AtomicReferenceArray<Double> dists = new AtomicReferenceArray<>(new Double[] { 1.0, 2.0 });
+
+        assertEquals(ILfs.ERROR_CODE_480, ridges.insertNeighbor(2, 9, 3.0, nbrList, dists, new AtomicInteger(2), 2));
+        assertEquals(4, nbrList.get(0));
+        assertEquals(7, nbrList.get(1));
+    }
+
+    /**
+     * Verifies that ridgeCount counts the vertical ridges crossed by the line between two
+     * minutiae, excluding the first ridge reached (treated as the minutia's own), with and
+     * without the log flag.
+     */
+    @Test
+    public void ridgeCountCountsCrossedRidges() {
+        int w = 30;
+        int h = 30;
+        int[] image = new int[w * h];
+        for (int y = 0; y < h; y++) {
+            for (int x : new int[] { 6, 7, 12, 13, 18, 19 }) {
+                image[y * w + x] = 1;
+            }
+        }
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 2, 15 }, { 25, 15 } });
+
+        Nist.setShowLogs(false);
+        assertEquals(2, ridges.ridgeCount(0, 1, minutiae, image, w, h, Globals.getInstance().getLfsParams()));
+        Nist.setShowLogs(true);
+        assertEquals(2, ridges.ridgeCount(0, 1, minutiae, image, w, h, Globals.getInstance().getLfsParams()));
+    }
+
+    /**
+     * Verifies that ridgeCount returns zero when the line leaves the starting ridge but never
+     * enters another one, with and without the log flag.
+     */
+    @Test
+    public void ridgeCountReturnsZeroWhenNoRidgeStartFollows() {
+        int w = 20;
+        int h = 5;
+        int[] image = new int[w * h];
+        Arrays.fill(image, 2 * w, 2 * w + 5, 1);
+        AtomicReference<Minutiae> minutiae = realMinutiae(new int[][] { { 2, 2 }, { 15, 2 } });
+
+        Nist.setShowLogs(true);
+        assertEquals(0, ridges.ridgeCount(0, 1, minutiae, image, w, h, Globals.getInstance().getLfsParams()));
+        Nist.setShowLogs(false);
+        assertEquals(0, ridges.ridgeCount(0, 1, minutiae, image, w, h, Globals.getInstance().getLfsParams()));
+    }
+
+    /**
+     * Verifies validateRidgeCrossing for every combination of clockwise / counter-clockwise
+     * trace results: errors are returned, IGNORE or LOOP_FOUND invalidate the crossing,
+     * and two clean traces validate it.
+     */
+    @Test
+    public void validateRidgeCrossingHandlesAllTraceOutcomes() {
+        assertEquals(-75, validateWithTraceResults(-75));
+        assertEquals(ILfs.FALSE, validateWithTraceResults(ILfs.IGNORE));
+        assertEquals(ILfs.FALSE, validateWithTraceResults(ILfs.LOOP_FOUND));
+        assertEquals(-76, validateWithTraceResults(ILfs.FALSE, -76));
+        assertEquals(ILfs.FALSE, validateWithTraceResults(ILfs.FALSE, ILfs.IGNORE));
+        assertEquals(ILfs.FALSE, validateWithTraceResults(ILfs.FALSE, ILfs.LOOP_FOUND));
+        assertEquals(ILfs.TRUE, validateWithTraceResults(ILfs.FALSE, ILfs.FALSE));
+    }
+
+    private int validateWithTraceResults(int... traceResults) {
+        Ridges spyRidges = Mockito.spy(ridges);
+        Contour spyContour = Mockito.spy(Contour.getInstance());
+        Mockito.doReturn(spyContour).when(spyRidges).getContour();
+        AtomicInteger call = new AtomicInteger();
+        Mockito.doAnswer(invocation -> {
+            ((AtomicInteger) invocation.getArgument(0)).set(traceResults[call.getAndIncrement()]);
+            return null;
+        }).when(spyContour).traceContour(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), any(), anyInt(), anyInt());
+
+        int result = spyRidges.validateRidgeCrossing(1, 3, new int[] { 0, 1, 2, 3, 4 }, new int[] { 5, 5, 5, 5, 5 }, 5,
+                new int[100], 10, 10, 10);
+        assertEquals(traceResults.length, call.get());
+        return result;
+    }
+
+    private AtomicReference<Minutiae> realMinutiae(int[][] points) {
+        Minutiae minutiae = new Minutiae();
+        List<Minutia> list = new ArrayList<>();
+        for (int[] p : points) {
+            list.add(MinutiaHelper.getInstance().createMinutia(p[0], p[1], p[0], p[1] - 1, 0, 0.99,
+                    ILfs.RIDGE_ENDING, ILfs.APPEARING, 0));
+        }
+        minutiae.setList(list);
+        minutiae.setNum(list.size());
+        minutiae.setAlloc(list.size());
+        return new AtomicReference<>(minutiae);
     }
 }

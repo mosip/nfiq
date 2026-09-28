@@ -14,14 +14,36 @@ import org.mosip.nist.nfiq1.common.ILfs.RotGrids;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Initialization routines for the lookup tables and work buffers used by
+ * MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code init.c}. Computes the image padding required by the
+ * LFS processes, and initializes the direction-to-radian table, the DFT wave
+ * forms, the rotated pixel grids used by DFT analysis and binarization, and the
+ * buffers that hold DFT power vectors and their statistics.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class Init extends MindTct implements IInit {
+	/** SLF4J logger for error reporting in this class. */
 	private static final Logger logger = LoggerFactory.getLogger(Init.class);
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Init instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Init() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Init} instance
+	 */
 	public static synchronized Init getInstance() {
 		if (instance == null) {
 			instance = new Init();
@@ -29,28 +51,41 @@ public class Init extends MindTct implements IInit {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (rounding and precision
+	 * truncation).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getMaxPadding - Deterines the maximum amount of image pixel padding
-	 * #cat: required by all LFS processes. Padding is currently #cat: required by
-	 * the rotated grids used in DFT analyses, #cat: rotated grids used in
-	 * directional binarization, #cat: and in the grid used for isotropic
-	 * binarization. #cat: The NIST generalized code enables the parameters #cat:
-	 * governing these processes to be redefined, so a check #cat: at runtime is
-	 * required to determine which process #cat: requires the most padding. By using
-	 * the maximum as #cat: the padding factor, all processes will run safely #cat:
-	 * with a single padding of the input image avoiding the #cat: need to repad for
-	 * further processes. Input: iMapBlockSize - the size (in pixels) of each IMAP
-	 * block in the image dirBinGridWidth - the width (in pixels) of the rotated
-	 * grids used in directional binarization dirBinGridHeight - the height (in
-	 * pixels) of the rotated grids used in directional binarization isobin_grid_dim
-	 * - the dimension (in pixels) of the square grid used in isotropic binarization
-	 * Return Code: Non-negative - the maximum padding required for all processes
-	 **************************************************************************/
+	/**
+	 * Determines the maximum amount of image pixel padding required by all LFS
+	 * (version 1) processes.
+	 * <p>
+	 * NIST: {@code get_max_padding()}. Padding is currently required by the
+	 * rotated grids used in DFT analyses, the rotated grids used in directional
+	 * binarization, and the grid used for isotropic binarization. The NIST
+	 * generalized code enables the parameters governing these processes to be
+	 * redefined, so a check at runtime is required to determine which process
+	 * requires the most padding. By using the maximum as the padding factor, all
+	 * processes will run safely with a single padding of the input image,
+	 * avoiding the need to repad for further processes. Intermediate values are
+	 * truncated to {@link ILfs#TRUNC_SCALE} for cross-platform consistency.
+	 *
+	 * @param iMapBlockSize    the size (in pixels) of each IMAP block in the
+	 *                         image
+	 * @param dirBinGridWidth  the width (in pixels) of the rotated grids used in
+	 *                         directional binarization
+	 * @param dirBinGridHeight the height (in pixels) of the rotated grids used in
+	 *                         directional binarization
+	 * @param isobin_grid_dim  the dimension (in pixels) of the square grid used
+	 *                         in isotropic binarization
+	 * @return non-negative: the maximum padding (in pixels) required for all
+	 *         processes
+	 */
 	public int getMaxPadding(final int iMapBlockSize, final int dirBinGridWidth, final int dirBinGridHeight,
 			final int isobin_grid_dim) {
 		int dftPad;
@@ -98,24 +133,30 @@ public class Init extends MindTct implements IInit {
 		return (maxPad);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getMaxPaddingV2 - Deterines the maximum amount of image pixel padding
-	 * #cat: required by all LFS (Version 2) processes. Padding is currently #cat:
-	 * required by the rotated grids used in DFT analyses and in #cat: directional
-	 * binarization. The NIST generalized code enables #cat: the parameters
-	 * governing these processes to be redefined, so a #cat: check at runtime is
-	 * required to determine which process #cat: requires the most padding. By using
-	 * the maximum as the padding #cat: factor, all processes will run safely with a
-	 * single padding of #cat: the input image avoiding the need to repad for
-	 * further processes. Input: mapWindowSize - the size (in pixels) of each window
-	 * centered about each block in the image used in DFT analyses mapWindowOffset -
-	 * the offset (in pixels) from the orgin of the surrounding window to the origin
-	 * of the block dirBinGridWidth - the width (in pixels) of the rotated grids
-	 * used in directional binarization dirBinGridHeight - the height (in pixels) of
-	 * the rotated grids used in directional binarization Return Code: Non-negative
-	 * - the maximum padding required for all processes
-	 **************************************************************************/
+	/**
+	 * Determines the maximum amount of image pixel padding required by all LFS
+	 * (version 2) processes.
+	 * <p>
+	 * NIST: {@code get_max_padding_V2()}. Padding is currently required by the
+	 * rotated grids used in DFT analyses and in directional binarization. The
+	 * NIST generalized code enables the parameters governing these processes to
+	 * be redefined, so a check at runtime is required to determine which process
+	 * requires the most padding. By using the maximum as the padding factor, all
+	 * processes will run safely with a single padding of the input image,
+	 * avoiding the need to repad for further processes. The DFT pad is the
+	 * rotational pad of the window plus {@code mapWindowOffset}.
+	 *
+	 * @param mapWindowSize    the size (in pixels) of each window centered about
+	 *                         each block in the image used in DFT analyses
+	 * @param mapWindowOffset  the offset (in pixels) from the origin of the
+	 *                         surrounding window to the origin of the block
+	 * @param dirBinGridWidth  the width (in pixels) of the rotated grids used in
+	 *                         directional binarization
+	 * @param dirBinGridHeight the height (in pixels) of the rotated grids used in
+	 *                         directional binarization
+	 * @return non-negative: the maximum padding (in pixels) required for all
+	 *         processes
+	 */
 	public int getMaxPaddingV2(final int mapWindowSize, final int mapWindowOffset, final int dirBinGridWidth,
 			final int dirBinGridHeight) {
 		int dftPad;
@@ -171,15 +212,21 @@ public class Init extends MindTct implements IInit {
 		return (maxPad);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: initDirToRad - Allocates and initializes a lookup table containing
-	 * #cat: cosine and sine values needed to convert integer IMAP #cat: directions
-	 * to angles in radians. Input: DirToRad - DirToRad Object // create at the
-	 * object creation constructor //points to the allocated/initialized DIR2RAD
-	 * structure Output: ret - values below Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Initializes a lookup table containing cosine and sine values needed to
+	 * convert integer IMAP directions to angles in radians.
+	 * <p>
+	 * NIST: {@code init_dir2rad()}. Unlike the C original, the {@link DirToRad}
+	 * object (with its number of directions and cos/sin arrays) is allocated by
+	 * the caller; this method only fills it. Direction {@code i} maps to angle
+	 * {@code i * 2 * PI / nDirs}; values are truncated to
+	 * {@link ILfs#TRUNC_SCALE} for cross-platform consistency.
+	 *
+	 * @param dirToRad input/output: pre-allocated DIR2RAD structure whose cos and
+	 *                 sin arrays are filled in
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int initDirToRad(DirToRad dirToRad) {
 		double theta;
 		double piFactor;
@@ -209,16 +256,24 @@ public class Init extends MindTct implements IInit {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: init_dftwaves - Allocates and initializes a set of wave forms needed
-	 * #cat: to conduct DFT analysis on blocks of the input image Input: DftWaves -
-	 * DftWaves Object // create at the object creation constructor // points to the
-	 * allocated/initialized DFTWAVES structure dftCoefs - array of multipliers used
-	 * to define the frequency for each wave form to be computed Output: ret -
-	 * values below Return Code: Zero - successful completion Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Initializes a set of wave forms needed to conduct DFT analysis on blocks
+	 * of the input image.
+	 * <p>
+	 * NIST: {@code init_dftwaves()}. The {@link DftWaves} container is allocated
+	 * by the caller; this method allocates one {@link DftWave} per wave and fills
+	 * its cos/sin sample arrays. The base frequency sets the period of the trig
+	 * functions to {@code waveLen} units (e.g. {@code 2 * PI / 24} for a block
+	 * size of 24), multiplied by the corresponding coefficient.
+	 *
+	 * @param dftWaves input/output: pre-allocated DFTWAVES structure (number of
+	 *                 waves and wave length set) whose waves are created and
+	 *                 filled in
+	 * @param dftCoefs array of multipliers used to define the frequency for each
+	 *                 wave form to be computed
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int initDftWaves(DftWaves dftWaves, AtomicReferenceArray<Double> dftCoefs) {
 		double piFactor;
 		double freq;
@@ -249,21 +304,31 @@ public class Init extends MindTct implements IInit {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: initRotGrids - Allocates and initializes a set of offsets that address
-	 * #cat: individual rotated pixels within a grid. #cat: These rotated grids are
-	 * used to conduct DFT analyses #cat: on blocks of input image data, and they
-	 * are used #cat: in isotropic binarization. Input: RotGrids - RotGrids Object
-	 * // create at the object creation constructor // points to the
-	 * allcated/initialized ROTGRIDS structure imageWidth - width (in pixels) of the
-	 * input image imageHeight - height (in pixels) of the input image pad -
-	 * designates the number of pixels to be padded to the perimeter of the input
-	 * image. May be passed as UNDEFINED, in which case the specific padding
-	 * required by the rotated grids will be computed and returned in ROTGRIDS.
-	 * Output: ret - values below Return Code: Zero - successful completion Negative
-	 * - system error
-	 **************************************************************************/
+	/**
+	 * Initializes a set of offsets that address individual rotated pixels within
+	 * a grid.
+	 * <p>
+	 * NIST: {@code init_rotgrids()}. These rotated grids are used to conduct DFT
+	 * analyses on blocks of input image data, and in directional/isotropic
+	 * binarization. For each of the {@code noOfGrids} directions (starting at the
+	 * grid's start angle and incrementing by {@code PI / noOfGrids}), each grid
+	 * pixel is rotated about the grid centre and stored as a pixel offset into
+	 * the padded image (offsets are relative to the grid centre or origin
+	 * according to {@link RotGrids#getRelative2()}). The {@link RotGrids} object
+	 * and its grid arrays are allocated by the caller; this method sets its pad
+	 * and fills the offsets.
+	 *
+	 * @param rotGrids    input/output: pre-allocated ROTGRIDS structure
+	 * @param imageWidth  width (in pixels) of the input image
+	 * @param imageHeight height (in pixels) of the input image
+	 * @param nPad        number of pixels to be padded to the perimeter of the
+	 *                    input image; may be {@link ILfs#UNDEFINED}, in which
+	 *                    case the specific padding required by the rotated grids
+	 *                    is computed and stored in {@code rotGrids}
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative on
+	 *         system error: -31 illegal relative flag, -32 pad passed is too
+	 *         small, {@link ILfs#ERROR_CODE_33} grid list not allocated
+	 */
 	public int initRotGrids(RotGrids rotGrids, final int imageWidth, final int imageHeight, final int nPad) {
 		double piOffset;
 		double piIncrement;
@@ -434,16 +499,19 @@ public class Init extends MindTct implements IInit {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocDirPowers - Allocates the memory associated with DFT power #cat:
-	 * vectors. The DFT analysis is conducted block by block in the #cat: input
-	 * image, and within each block, N wave forms are applied #cat: at M different
-	 * directions. Input: nWaves - number of DFT wave forms nDirs - number of
-	 * orientations (directions) used in DFT analysis Output: ret - returncode
-	 * oPowers - pointer to the allcated power vectors Return Code: ret - Zero -
-	 * successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Allocates the memory associated with DFT power vectors.
+	 * <p>
+	 * NIST: {@code alloc_dir_powers()}. The DFT analysis is conducted block by
+	 * block in the input image, and within each block, N wave forms are applied
+	 * at M different directions. All powers are initialized to 0.0.
+	 *
+	 * @param ret    output: zero ({@link ILfs#FALSE}) on successful completion
+	 *               (negative would indicate a system error)
+	 * @param nWaves number of DFT wave forms
+	 * @param nDirs  number of orientations (directions) used in DFT analysis
+	 * @return the allocated power vectors, indexed {@code [wave][direction]}
+	 */
 	public AtomicReferenceArray<Double[]> allocDirPowers(AtomicInteger ret, final int nWaves, final int nDirs) {
 		ret.set(ILfs.UNDEFINED);
 		/* Allocate list of double pointers to hold power vectors */
@@ -460,21 +528,25 @@ public class Init extends MindTct implements IInit {
 		return new AtomicReferenceArray<>(oPowers);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocPowerStatsWis - Allocates memory associated with set of statistics
-	 * #cat: derived from DFT power vectors computed in a block of the #cat: input
-	 * image. Statistics are not computed for the lowest DFT #cat: wave form, so the
-	 * length of the statistics arrays is 1 less #cat: than the number of DFT wave
-	 * forms used. The staistics #cat: include the Maximum power for each wave form,
-	 * the direction #cat: at which the maximum power occured, and a normalized
-	 * value #cat: for the maximum power. In addition, the statistics are #cat:
-	 * ranked in descending order based on normalized squared #cat: maximum power.
-	 * Input: nStats - the number of waves forms from which statistics are to be
-	 * derived (N Waves - 1) Output: ret - returncode owis - points to an array to
-	 * hold the ranked wave form indicies of the corresponding statistics Return
-	 * Code: ret - Zero - successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Allocates the wave-form index array of the statistics derived from DFT
+	 * power vectors computed in a block of the input image.
+	 * <p>
+	 * NIST: part of {@code alloc_power_stats()}. Statistics are not computed for
+	 * the lowest DFT wave form, so the length of the statistics arrays is one
+	 * less than the number of DFT wave forms used. The statistics include the
+	 * maximum power for each wave form, the direction at which the maximum power
+	 * occurred, and a normalized value for the maximum power. In addition, the
+	 * statistics are ranked in descending order based on normalized squared
+	 * maximum power. All entries are initialized to 0.
+	 *
+	 * @param ret    output: zero ({@link ILfs#FALSE}) on successful completion
+	 *               (negative would indicate a system error)
+	 * @param nStats the number of wave forms from which statistics are to be
+	 *               derived (N waves - 1)
+	 * @return an array to hold the ranked wave form indices of the corresponding
+	 *         statistics
+	 */
 	public AtomicIntegerArray allocPowerStatsWis(AtomicInteger ret, final int nStats) {
 		/* Allocate DFT wave index vector */
 		int[] wis = new int[nStats];
@@ -486,21 +558,22 @@ public class Init extends MindTct implements IInit {
 		return new AtomicIntegerArray(wis);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocPowerStatsPowmaxs - Allocates memory associated with set of
-	 * statistics #cat: derived from DFT power vectors computed in a block of the
-	 * #cat: input image. Statistics are not computed for the lowest DFT #cat: wave
-	 * form, so the length of the statistics arrays is 1 less #cat: than the number
-	 * of DFT wave forms used. The staistics #cat: include the Maximum power for
-	 * each wave form, the direction #cat: at which the maximum power occured, and a
-	 * normalized value #cat: for the maximum power. In addition, the statistics are
-	 * #cat: ranked in descending order based on normalized squared #cat: maximum
-	 * power. Input: nStats - the number of waves forms from which statistics are to
-	 * be derived (N Waves - 1) Output: ret - returncode opowmaxs - points to an
-	 * array to hold the maximum DFT power for each Return Code: ret - Zero -
-	 * successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Allocates the maximum-power array of the statistics derived from DFT power
+	 * vectors computed in a block of the input image.
+	 * <p>
+	 * NIST: part of {@code alloc_power_stats()}. Statistics are not computed for
+	 * the lowest DFT wave form, so the length of the statistics arrays is one
+	 * less than the number of DFT wave forms used (see
+	 * {@link #allocPowerStatsWis(AtomicInteger, int)}). All entries are
+	 * initialized to 0.0.
+	 *
+	 * @param ret    output: zero ({@link ILfs#FALSE}) on successful completion
+	 *               (negative would indicate a system error)
+	 * @param nStats the number of wave forms from which statistics are to be
+	 *               derived (N waves - 1)
+	 * @return an array to hold the maximum DFT power for each wave form
+	 */
 	public AtomicReferenceArray<Double> allocPowerStatsPowmaxs(AtomicInteger ret, final int nStats) {
 		/* Allocate max power vector */
 		Double[] powmaxs = new Double[nStats];
@@ -511,21 +584,23 @@ public class Init extends MindTct implements IInit {
 		return new AtomicReferenceArray<>(powmaxs);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocPowerStatsPowmaxDirs - Allocates memory associated with set of
-	 * statistics #cat: derived from DFT power vectors computed in a block of the
-	 * #cat: input image. Statistics are not computed for the lowest DFT #cat: wave
-	 * form, so the length of the statistics arrays is 1 less #cat: than the number
-	 * of DFT wave forms used. The staistics #cat: include the Maximum power for
-	 * each wave form, the direction #cat: at which the maximum power occured, and a
-	 * normalized value #cat: for the maximum power. In addition, the statistics are
-	 * #cat: ranked in descending order based on normalized squared #cat: maximum
-	 * power. Input: nStats - the number of waves forms from which statistics are to
-	 * be derived (N Waves - 1) Output: ret - returncode opowmax_dirs - points to an
-	 * array to hold the direction corresponding to each maximum power value Return
-	 * Code: ret - Zero - successful completion - Negative - system error
-	 **************************************************************************/
+	/**
+	 * Allocates the maximum-power direction array of the statistics derived from
+	 * DFT power vectors computed in a block of the input image.
+	 * <p>
+	 * NIST: part of {@code alloc_power_stats()}. Statistics are not computed for
+	 * the lowest DFT wave form, so the length of the statistics arrays is one
+	 * less than the number of DFT wave forms used (see
+	 * {@link #allocPowerStatsWis(AtomicInteger, int)}). All entries are
+	 * initialized to 0.
+	 *
+	 * @param ret    output: zero ({@link ILfs#FALSE}) on successful completion
+	 *               (negative would indicate a system error)
+	 * @param nStats the number of wave forms from which statistics are to be
+	 *               derived (N waves - 1)
+	 * @return an array to hold the direction corresponding to each maximum power
+	 *         value
+	 */
 	public AtomicIntegerArray allocPowerStatsPowmaxDirs(AtomicInteger ret, final int nStats) {
 		/* Allocate max power direction vector */
 		int[] powmaxDirs = new int[nStats];
@@ -536,21 +611,22 @@ public class Init extends MindTct implements IInit {
 		return new AtomicIntegerArray(powmaxDirs);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: allocPowerStatsPownorms - Allocates memory associated with set of
-	 * statistics #cat: derived from DFT power vectors computed in a block of the
-	 * #cat: input image. Statistics are not computed for the lowest DFT #cat: wave
-	 * form, so the length of the statistics arrays is 1 less #cat: than the number
-	 * of DFT wave forms used. The staistics #cat: include the Maximum power for
-	 * each wave form, the direction #cat: at which the maximum power occured, and a
-	 * normalized value #cat: for the maximum power. In addition, the statistics are
-	 * #cat: ranked in descending order based on normalized squared #cat: maximum
-	 * power. Input: nStats - the number of waves forms from which statistics are to
-	 * be derived (N Waves - 1) Output: opownorms - points to an array to hold the
-	 * normalized maximum power Return Code: ret - Zero - successful completion -
-	 * Negative - system error
-	 **************************************************************************/
+	/**
+	 * Allocates the normalized maximum-power array of the statistics derived
+	 * from DFT power vectors computed in a block of the input image.
+	 * <p>
+	 * NIST: part of {@code alloc_power_stats()}. Statistics are not computed for
+	 * the lowest DFT wave form, so the length of the statistics arrays is one
+	 * less than the number of DFT wave forms used (see
+	 * {@link #allocPowerStatsWis(AtomicInteger, int)}). All entries are
+	 * initialized to 0.0.
+	 *
+	 * @param ret    output: zero ({@link ILfs#FALSE}) on successful completion
+	 *               (negative would indicate a system error)
+	 * @param nStats the number of wave forms from which statistics are to be
+	 *               derived (N waves - 1)
+	 * @return an array to hold the normalized maximum power for each wave form
+	 */
 	public AtomicReferenceArray<Double> allocPowerStatsPownorms(AtomicInteger ret, final int nStats) {
 		/* Allocate normalized power vector */
 		Double[] pownorms = new Double[nStats];

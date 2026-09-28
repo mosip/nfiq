@@ -183,7 +183,7 @@ public class ResultsTest {
      */
     @Test
     public void validateBlockDrawingWithBoundaryOffsets() {
-        int mapWidth = 1;
+        int mapWidth = 2;
         int mapHeight = 1;
         int paddedImageWidth = 5;
         int paddedImageHeight = 5;

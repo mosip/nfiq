@@ -8,14 +8,34 @@ import org.mosip.nist.nfiq1.common.ILfs.ILine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Line rasterization utilities used by MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code line.c}. Computes the contiguous pixel coordinates
+ * along a straight line between two points; used for example when joining
+ * ridges, filling gaps and testing pixel trajectories between minutiae.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class Line extends MindTct implements ILine {
+	/** SLF4J logger for error reporting in this class. */
 	private static final Logger logger = LoggerFactory.getLogger(Line.class);
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Line instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Line() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Line} instance
+	 */
 	public static synchronized Line getInstance() {
 		if (instance == null) {
 			instance = new Line();
@@ -23,23 +43,52 @@ public class Line extends MindTct implements ILine {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (numeric utility routines such as
+	 * precision truncation).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release buffers on error
+	 * paths.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: linePoints - Returns the contiguous coordinates of a line connecting
-	 * #cat: 2 specified points. Input: x1 - x-coord of first point y1 - y-coord of
-	 * first point x2 - x-coord of second point y2 - y-coord of second point Output:
-	 * xList - x-coords along line trajectory yList - y-coords along line trajectory
-	 * oNoOfPointsOnLine - number of points along line trajectory Return Code: Zero
-	 * - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Returns the contiguous coordinates of a line connecting two specified
+	 * points.
+	 * <p>
+	 * NIST: {@code line_points()}. Uses a DDA-style algorithm: the axis with the
+	 * larger delta is stepped by +/-1 per point while the other axis advances by
+	 * the fractional slope and is rounded to the nearest pixel (when |DX| equals
+	 * |DY| both axes step by +/-1). Floating point accumulators are truncated to
+	 * {@link ILfs#TRUNC_SCALE} so results are consistent across architectures.
+	 * <p>
+	 * The caller must pre-allocate {@code xList} and {@code yList} with at least
+	 * {@code max(|x2 - x1| + 2, |y2 - y1| + 2)} entries. The first point written
+	 * is ({@code x1}, {@code y1}) and the last is ({@code x2}, {@code y2}).
+	 *
+	 * @param xList             output: x-coords along the line trajectory
+	 * @param yList             output: y-coords along the line trajectory
+	 * @param oNoOfPointsOnLine output: set to the number of points written to
+	 *                          {@code xList}/{@code yList}
+	 * @param x1                x-coord of first point
+	 * @param y1                y-coord of first point
+	 * @param x2                x-coord of second point
+	 * @param y2                y-coord of second point
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative
+	 *         ({@link ILfs#ERROR_CODE_412}) on system error (coordinate list
+	 *         overflow)
+	 */
 	public int linePoints(int[] xList, int[] yList, AtomicInteger oNoOfPointsOnLine, final int x1, final int y1,
 			final int x2, final int y2) {
 		int dx;

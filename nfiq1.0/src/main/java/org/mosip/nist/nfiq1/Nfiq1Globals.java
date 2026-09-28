@@ -4,11 +4,17 @@ import org.mosip.nist.nfiq1.common.IMlp;
 import org.mosip.nist.nfiq1.common.INfiq;
 import org.mosip.nist.nfiq1.common.INfiq.INfiq1Globals;
 
+/**
+ * Default NFIQ 1.0 model data: Z-normalization statistics and trained MLP weights (port of NIST's
+ * {@code nfiqgbls.c}).
+ * <p>
+ * These values were produced by NIST when training the NFIQ neural network and must not be altered, or scores
+ * will no longer match the reference NFIQ 1.0 implementation. Each instance owns its own arrays; the setters
+ * allow alternative models to be plugged in. Not thread-safe if mutated concurrently.
+ */
 public class Nfiq1Globals implements INfiq1Globals
 {
-	/***********************************************************************
-	  Default global means for Z-Normalization of feature vectors
-	************************************************************************/
+	/** Default global means used to Z-normalize each of the 11 NFIQ feature-vector coefficients. */
 	private double[] dfltZnormMeans  = {
 		   2881.918457d,
 		   119.406013d,
@@ -23,9 +29,7 @@ public class Nfiq1Globals implements INfiq1Globals
 		   0.447761d
 	   };
 
-	/***********************************************************************
-	  Default global stddevs for Z-Normalization of feature vectors
-	************************************************************************/
+	/** Default global standard deviations used to Z-normalize each of the 11 NFIQ feature-vector coefficients. */
 	private double[] dfltZnormStds = {
 			1.522167e+03,
 			   6.759113e+01,
@@ -40,15 +44,22 @@ public class Nfiq1Globals implements INfiq1Globals
 			   1.551811e-01
 	   };
 
-	/***********************************************************************
-	  Default MLP weights & attributes used to classify NFIQ feature vectors
-	************************************************************************/
+	/** Purpose of the default MLP ({@code IMlp.CLASSIFIER}). */
 	private char dfltPurpose = IMlp.CLASSIFIER;
+	/** Number of MLP inputs, equal to the feature vector length ({@code INfiq.NFIQ_VCTRLEN} = 11). */
 	private int  dfltNInps = INfiq.NFIQ_VCTRLEN;
+	/** Number of hidden-layer nodes in the default MLP (22). */
 	private int  dfltNHids = 22;
+	/** Number of MLP outputs, equal to the number of NFIQ classes ({@code INfiq.NFIQ_NUM_CLASSES} = 5). */
 	private int  dfltNOuts = INfiq.NFIQ_NUM_CLASSES;
+	/** Activation function code for the hidden layer ({@code IMlp.SINUSOID}). */
 	private int dfltAcFuncHids = IMlp.SINUSOID;
+	/** Activation function code for the output layer ({@code IMlp.SINUSOID}). */
 	private int dfltAcFuncOuts = IMlp.SINUSOID;
+	/**
+	 * Default trained MLP weights and biases (input-to-hidden followed by hidden-to-output), used to classify NFIQ
+	 * feature vectors.
+	 */
 	private double[] dfltWts = {
 		-3.119589e-01d, 6.611657e-01d,-5.026219e-01d, 3.649307e-01d,-8.559146e-01d,
 		 0.000000e+00d, 0.000000e+00d, 6.067616e-01d,-1.805089e-01d,-1.131759e-01d,
@@ -151,65 +162,155 @@ public class Nfiq1Globals implements INfiq1Globals
 
 		-6.955023e-01d,-1.218332e+00d,-3.902654e-01d,-2.646753e-01d,-8.862965e-01d,
 	};
+	/**
+	 * Returns the default Z-normalization means.
+	 *
+	 * @return the per-coefficient means
+	 */
 	public double[] getDfltZnormMeans() {
 		return dfltZnormMeans;
 	}
+	/**
+	 * Sets the default Z-normalization means.
+	 *
+	 * @param dfltZnormMeans the per-coefficient means
+	 */
 	public void setDfltZnormMeans(double[] dfltZnormMeans) {
 		this.dfltZnormMeans = dfltZnormMeans;
 	}
 	
+	/**
+	 * Returns the default Z-normalization standard deviations.
+	 *
+	 * @return the per-coefficient standard deviations
+	 */
 	public double[] getDfltZnormStds() {
 		return dfltZnormStds;
 	}
+	/**
+	 * Sets the default Z-normalization standard deviations.
+	 *
+	 * @param dfltZnormStds the per-coefficient standard deviations
+	 */
 	public void setDflt_znorm_stds(double[] dfltZnormStds) {
 		this.dfltZnormStds = dfltZnormStds;
 	}
 	
+	/**
+	 * Returns the purpose of the default MLP.
+	 *
+	 * @return the purpose code (e.g. {@code IMlp.CLASSIFIER})
+	 */
 	public char getDfltPurpose() {
 		return dfltPurpose;
 	}
+	/**
+	 * Sets the purpose of the default MLP.
+	 *
+	 * @param dfltPurpose the purpose code (e.g. {@code IMlp.CLASSIFIER})
+	 */
 	public void setDfltPurpose(char dfltPurpose) {
 		this.dfltPurpose = dfltPurpose;
 	}
 	
+	/**
+	 * Returns the number of MLP inputs.
+	 *
+	 * @return the feature vector length
+	 */
 	public int getDfltNInps() {
 		return dfltNInps;
 	}
+	/**
+	 * Sets the number of MLP inputs.
+	 *
+	 * @param dfltNInps the feature vector length
+	 */
 	public void setDfltNInps(int dfltNInps) {
 		this.dfltNInps = dfltNInps;
 	}
 	
+	/**
+	 * Returns the number of hidden-layer nodes.
+	 *
+	 * @return the hidden node count
+	 */
 	public int getDfltNHids() {
 		return dfltNHids;
 	}
+	/**
+	 * Sets the number of hidden-layer nodes.
+	 *
+	 * @param dfltNHids the hidden node count
+	 */
 	public void setDfltNHids(int dfltNHids) {
 		this.dfltNHids = dfltNHids;
 	}
 	
+	/**
+	 * Returns the number of MLP outputs.
+	 *
+	 * @return the number of NFIQ classes
+	 */
 	public int getDfltNOuts() {
 		return dfltNOuts;
 	}
+	/**
+	 * Sets the number of MLP outputs.
+	 *
+	 * @param dfltNOuts the number of NFIQ classes
+	 */
 	public void setDfltNOuts(int dfltNOuts) {
 		this.dfltNOuts = dfltNOuts;
 	}
 	
+	/**
+	 * Returns the hidden-layer activation function code.
+	 *
+	 * @return the activation function code (e.g. {@code IMlp.SINUSOID})
+	 */
 	public int getDfltAcFuncHids() {
 		return dfltAcFuncHids;
 	}
+	/**
+	 * Sets the hidden-layer activation function code.
+	 *
+	 * @param dfltAcFuncHids the activation function code (e.g. {@code IMlp.SINUSOID})
+	 */
 	public void setDfltAcFuncHids(int dfltAcFuncHids) {
 		this.dfltAcFuncHids = dfltAcFuncHids;
 	}
 	
+	/**
+	 * Returns the output-layer activation function code.
+	 *
+	 * @return the activation function code (e.g. {@code IMlp.SINUSOID})
+	 */
 	public int getDfltAcFuncOuts() {
 		return dfltAcFuncOuts;
 	}
+	/**
+	 * Sets the output-layer activation function code.
+	 *
+	 * @param dfltAcFuncOuts the activation function code (e.g. {@code IMlp.SINUSOID})
+	 */
 	public void setDfltAcFuncOuts(int dfltAcFuncOuts) {
 		this.dfltAcFuncOuts = dfltAcFuncOuts;
 	}
 	
+	/**
+	 * Returns the default MLP weights.
+	 *
+	 * @return the weights array
+	 */
 	public double[] getDfltWts() {
 		return dfltWts;
 	}
+	/**
+	 * Sets the default MLP weights.
+	 *
+	 * @param dfltWts the weights array
+	 */
 	public void setDfltWts(double[] dfltWts) {
 		this.dfltWts = dfltWts;
 	}	

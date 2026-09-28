@@ -13,7 +13,18 @@ import org.mosip.nist.nfiq1.common.ILfs.LfsParams;
 import org.mosip.nist.nfiq1.common.ILfs.Minutia;
 import org.mosip.nist.nfiq1.common.ILfs.Minutiae;
 
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
+import org.mosip.nist.nfiq1.Nist;
+import org.mosip.nist.nfiq1.imagetools.ImageDecoder;
+
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.lang.reflect.Constructor;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
@@ -34,6 +45,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * Comprehensive test suite for MinutiaHelper class functionality.
@@ -1442,22 +1458,17 @@ class MinutiaHelperTest {
     }
 
     /**
-     * Validates minutiae scanning error handling with graceful failure.
+     * Validates the V1 scan completes over a region reaching the image edge.
      */
     @Test
-    void scanForMinutiaeErrorHandling() {
+    void scanForMinutiaeCompletesAtImageEdge() {
         AtomicReference<Minutiae> oMinutiae = createEmptyMinutiae();
         int[] binaryData = createValidBinaryData(15, 15);
         AtomicIntegerArray directionMap = createValidDirectionMap(9);
         AtomicIntegerArray nMap = createValidNMap(9);
 
-        Exception exception = assertThrows(ArrayIndexOutOfBoundsException.class, () -> {
-            minutiaHelper.scanForMinutiae(oMinutiae, binaryData, 15, 15, directionMap, nMap,
-                    1, 1, 3, 3, 1, 1, 13, 13, ILfs.SCAN_HORIZONTAL, mockLfsParams);
-        });
-
-        assertTrue(exception.getMessage().contains("Index -1 out of bounds") ||
-                exception.getMessage().contains("out of bounds"));
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiae(oMinutiae, binaryData, 15, 15, directionMap, nMap,
+                1, 1, 3, 3, 1, 1, 13, 13, ILfs.SCAN_HORIZONTAL, mockLfsParams));
     }
 
     /**
@@ -2408,5 +2419,1163 @@ class MinutiaHelperTest {
             map.set(i, ILfs.FALSE);
         }
         return map;
+    }
+
+    // ------------------------------------------------------------------------
+    // Real fingerprint (info_wsq.iso) based tests
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that detectMinutiaeV2 finds minutiae on a real binarized fingerprint
+     * and assigns only the reliabilities, types and directions the V2 scan can produce.
+     */
+    @Test
+    void detectMinutiaeV2OnRealFingerprintFindsValidMinutiae() throws Exception {
+        RealImageFixture f = realImage();
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(ILfs.MAX_MINUTIAE);
+
+        int ret = minutiaHelper.detectMinutiaeV2(minutiae, f.binaryImage.clone(), f.width, f.height, f.maps,
+                lfsParamsV2());
+
+        assertEquals(ILfs.FALSE, ret);
+        assertTrue(minutiae.get().getNum() > 10, "expected a realistic number of minutiae");
+        assertEquals(minutiae.get().getNum(), minutiae.get().getList().size());
+        for (Minutia m : minutiae.get().getList()) {
+            assertTrue(m.getX() >= 0 && m.getX() < f.width);
+            assertTrue(m.getY() >= 0 && m.getY() < f.height);
+            assertTrue(m.getReliability() == ILfs.HIGH_RELIABILITY || m.getReliability() == ILfs.MEDIUM_RELIABILITY);
+            assertTrue(m.getType() == ILfs.RIDGE_ENDING || m.getType() == ILfs.BIFURCATION);
+            assertTrue(m.getDirection() >= 0 && m.getDirection() < 2 * ILfs.NUM_DIRECTIONS);
+        }
+    }
+
+    /**
+     * Verifies that the V1 horizontal scan over a whole real fingerprint detects minutiae,
+     * both in low-curvature mode and in high-curvature (contour-adjusted) mode.
+     */
+    @Test
+    void scanForMinutiaeHorizontallyOnRealFingerprint() throws Exception {
+        RealImageFixture f = realImage();
+
+        AtomicReference<Minutiae> lowCurvature = newMinutiaeList(ILfs.MAX_MINUTIAE);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiaeHorizontally(lowCurvature, f.binaryImage.clone(),
+                f.width, f.height, 4, 4, 0, 0, f.width, f.height, lfsParamsV1()));
+        assertTrue(lowCurvature.get().getNum() > 0);
+        for (Minutia m : lowCurvature.get().getList()) {
+            assertEquals(ILfs.DEFAULT_RELIABILITY, m.getReliability());
+        }
+
+        AtomicReference<Minutiae> highCurvature = newMinutiaeList(ILfs.MAX_MINUTIAE);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiaeHorizontally(highCurvature, f.binaryImage.clone(),
+                f.width, f.height, 4, ILfs.HIGH_CURVATURE, 0, 0, f.width, f.height, lfsParamsV1()));
+        assertTrue(highCurvature.get().getNum() <= lowCurvature.get().getNum(),
+                "high-curvature processing only keeps features with a sharp contour");
+    }
+
+    /**
+     * Verifies that a system error from processHorizontalScanMinutia aborts the V1 horizontal scan.
+     */
+    @Test
+    void scanForMinutiaeHorizontallyPropagatesProcessingError() throws Exception {
+        RealImageFixture f = realImage();
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-61).when(helper).processHorizontalScanMinutia(any(), anyInt(), anyInt(), anyInt(), anyInt(), any(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+
+        assertEquals(-61, helper.scanForMinutiaeHorizontally(newMinutiaeList(10), f.binaryImage.clone(), f.width,
+                f.height, 4, 4, 0, 0, f.width, f.height, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies that system errors from the V2 per-minutia processing abort both V2 scans.
+     */
+    @Test
+    void scanForMinutiaeV2PropagatesProcessingErrors() throws Exception {
+        RealImageFixture f = realImage();
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-62).when(helper).processHorizontalScanMinutiaV2(any(), anyInt(), anyInt(), anyInt(), anyInt(), any(),
+                anyInt(), anyInt(), any(), any(), any(), any());
+        doReturn(-63).when(helper).processVerticalScanMinutiaV2(any(), anyInt(), anyInt(), anyInt(), anyInt(), any(),
+                anyInt(), anyInt(), any(), any(), any(), any());
+
+        assertEquals(-62, helper.scanForMinutiaeHorizontallyV2(newMinutiaeList(10), f.binaryImage.clone(), f.width,
+                f.height, f.directionMap, f.lowFlowMap, f.highCurveMap, lfsParamsV2()));
+        assertEquals(-63, helper.scanForMinutiaeVerticallyV2(newMinutiaeList(10), f.binaryImage.clone(), f.width,
+                f.height, f.directionMap, f.lowFlowMap, f.highCurveMap, lfsParamsV2()));
+    }
+
+    /**
+     * Verifies that an IGNORE result from V2 processing does not stop the V2 scans.
+     */
+    @Test
+    void scanForMinutiaeV2ContinuesAfterIgnoredMinutia() throws Exception {
+        RealImageFixture f = realImage();
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(ILfs.IGNORE).when(helper).processHorizontalScanMinutiaV2(any(), anyInt(), anyInt(), anyInt(),
+                anyInt(), any(), anyInt(), anyInt(), any(), any(), any(), any());
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+
+        assertEquals(ILfs.FALSE, helper.scanForMinutiaeHorizontallyV2(minutiae, f.binaryImage.clone(), f.width,
+                f.height, f.directionMap, f.lowFlowMap, f.highCurveMap, lfsParamsV2()));
+        assertEquals(0, minutiae.get().getNum());
+    }
+
+    // ------------------------------------------------------------------------
+    // detectMinutiaeV2 error propagation
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that detectMinutiaeV2 returns the error of whichever map pixelization fails first.
+     */
+    @Test
+    void detectMinutiaeV2PropagatesPixelizeMapErrors() {
+        Maps maps = mock(Maps.class);
+        when(maps.getMappedImageWidth()).thenReturn(new AtomicInteger(1));
+        when(maps.getMappedImageHeight()).thenReturn(new AtomicInteger(1));
+
+        when(maps.pixelizeMap(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), anyInt())).thenReturn(-11);
+        assertEquals(-11, minutiaHelper.detectMinutiaeV2(newMinutiaeList(1), new int[16], 4, 4, maps, lfsParamsV2()));
+
+        when(maps.pixelizeMap(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), anyInt())).thenReturn(0, -12);
+        assertEquals(-12, minutiaHelper.detectMinutiaeV2(newMinutiaeList(1), new int[16], 4, 4, maps, lfsParamsV2()));
+
+        when(maps.pixelizeMap(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), anyInt())).thenReturn(0, 0, -13);
+        assertEquals(-13, minutiaHelper.detectMinutiaeV2(newMinutiaeList(1), new int[16], 4, 4, maps, lfsParamsV2()));
+    }
+
+    /**
+     * Verifies that detectMinutiaeV2 stops after a failing horizontal scan and reports a failing vertical scan.
+     */
+    @Test
+    void detectMinutiaeV2PropagatesScanErrors() {
+        Maps maps = mock(Maps.class);
+        when(maps.getMappedImageWidth()).thenReturn(new AtomicInteger(1));
+        when(maps.getMappedImageHeight()).thenReturn(new AtomicInteger(1));
+        when(maps.pixelizeMap(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), anyInt())).thenReturn(0);
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+
+        doReturn(-14).when(helper).scanForMinutiaeHorizontallyV2(any(), any(), anyInt(), anyInt(), any(), any(), any(),
+                any());
+        assertEquals(-14, helper.detectMinutiaeV2(newMinutiaeList(1), new int[16], 4, 4, maps, lfsParamsV2()));
+        verify(helper, never()).scanForMinutiaeVerticallyV2(any(), any(), anyInt(), anyInt(), any(), any(), any(),
+                any());
+
+        doReturn(ILfs.FALSE).when(helper).scanForMinutiaeHorizontallyV2(any(), any(), anyInt(), anyInt(), any(), any(),
+                any(), any());
+        doReturn(-15).when(helper).scanForMinutiaeVerticallyV2(any(), any(), anyInt(), anyInt(), any(), any(), any(),
+                any());
+        assertEquals(-15, helper.detectMinutiaeV2(newMinutiaeList(1), new int[16], 4, 4, maps, lfsParamsV2()));
+    }
+
+    // ------------------------------------------------------------------------
+    // updateMinutiae / updateMinutiaeV2
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that updateMinutiae ignores a new minutia found on the same ridge contour
+     * as an existing one, whichever side of the existing minutia it lies on.
+     */
+    @Test
+    void updateMinutiaeIgnoresMinutiaOnSameContour() {
+        int[] image = horizontalBarImage();
+        for (int newX : new int[] { 17, 23 }) {
+            AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+            Minutia existing = minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+            assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(minutiae, existing, image, 60, 30, lfsParamsV1()));
+
+            Minutia candidate = minutiaHelper.createMinutia(newX, 10, newX, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+            assertEquals(ILfs.IGNORE, minutiaHelper.updateMinutiae(minutiae, candidate, image, 60, 30, lfsParamsV1()));
+            assertEquals(1, minutiae.get().getNum());
+            assertSame(existing, minutiae.get().getList().get(0));
+        }
+    }
+
+    /**
+     * Verifies that updateMinutiae keeps nearby minutiae that differ in contour, type,
+     * direction or distance from the existing list entry.
+     */
+    @Test
+    void updateMinutiaeAddsDistinctNearbyMinutiae() {
+        int[] image = horizontalBarImage();
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        minutiaHelper.updateMinutiae(minutiae,
+                minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), image, 60, 30,
+                lfsParamsV1());
+
+        // Opposite (bottom) edge of the ridge: not reachable along the top contour.
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(minutiae,
+                minutiaHelper.createMinutia(22, 12, 22, 13, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), image, 60, 30,
+                lfsParamsV1()));
+        // Different type.
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(minutiae,
+                minutiaHelper.createMinutia(21, 10, 21, 9, 0, 0.99, ILfs.BIFURCATION, 1, 0), image, 60, 30,
+                lfsParamsV1()));
+        // Direction differs by more than 45 degrees.
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(minutiae,
+                minutiaHelper.createMinutia(20, 10, 20, 9, 16, 0.99, ILfs.RIDGE_ENDING, 1, 0), image, 60, 30,
+                lfsParamsV1()));
+        // Too far away in Y.
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(minutiae,
+                minutiaHelper.createMinutia(20, 25, 20, 26, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), image, 60, 30,
+                lfsParamsV1()));
+        assertEquals(5, minutiae.get().getNum());
+    }
+
+    /**
+     * Verifies that updateMinutiae grows a full list and propagates reallocation errors.
+     */
+    @Test
+    void updateMinutiaeReallocatesFullListAndPropagatesReallocError() {
+        AtomicReference<Minutiae> full = newMinutiaeList(1);
+        minutiaHelper.updateMinutiae(full, minutiaHelper.createMinutia(5, 5, 5, 4, 0, 0.99, 1, 1, 0), new int[900], 30,
+                30, lfsParamsV1());
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiae(full,
+                minutiaHelper.createMinutia(25, 25, 25, 24, 0, 0.99, 1, 1, 0), new int[900], 30, 30, lfsParamsV1()));
+        assertEquals(2, full.get().getNum());
+        assertEquals(1 + ILfs.MAX_MINUTIAE, full.get().getAlloc());
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-16).when(helper).reallocMinutiae(any(), anyInt());
+        assertEquals(-16, helper.updateMinutiae(newMinutiaeList(0),
+                minutiaHelper.createMinutia(5, 5, 5, 4, 0, 0.99, 1, 1, 0), new int[900], 30, 30, lfsParamsV1()));
+        assertEquals(-16, helper.updateMinutiaeV2(newMinutiaeList(0),
+                minutiaHelper.createMinutia(5, 5, 5, 4, 0, 0.99, 1, 1, 0), ILfs.SCAN_HORIZONTAL, 0, new int[900], 30,
+                30, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies updateMinutiaeV2 decisions for a candidate on the same contour as an existing
+     * minutia: identical point, invalid block direction, incompatible and compatible scan directions.
+     */
+    @Test
+    void updateMinutiaeV2ResolvesMinutiaeOnSameContour() {
+        int[] image = horizontalBarImage();
+        Minutia existing = minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        minutiaHelper.updateMinutiaeV2(minutiae, existing, ILfs.SCAN_HORIZONTAL, 0, image, 60, 30, lfsParamsV1());
+
+        // Same exact point.
+        assertEquals(ILfs.IGNORE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        // Same contour, block direction INVALID.
+        assertEquals(ILfs.IGNORE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(23, 10, 23, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL,
+                ILfs.INVALID_DIR, image, 60, 30, lfsParamsV1()));
+        // Same contour, block direction 8 implies a vertical scan, but found horizontally.
+        assertEquals(ILfs.IGNORE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(17, 10, 17, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 8,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(1, minutiae.get().getNum());
+        assertSame(existing, minutiae.get().getList().get(0));
+
+        // Same contour, block direction 0 implies a horizontal scan: the new minutia replaces the old one.
+        Minutia replacement = minutiaHelper.createMinutia(23, 10, 23, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae, replacement, ILfs.SCAN_HORIZONTAL, 0, image,
+                60, 30, lfsParamsV1()));
+        assertEquals(1, minutiae.get().getNum());
+        assertSame(replacement, minutiae.get().getList().get(0));
+    }
+
+    /**
+     * Verifies that updateMinutiaeV2 keeps distinct nearby minutiae, grows a full list,
+     * and propagates a failure to remove the replaced minutia.
+     */
+    @Test
+    void updateMinutiaeV2AddsDistinctMinutiaeAndPropagatesRemoveError() {
+        int[] image = horizontalBarImage();
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(1);
+        minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1());
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(22, 12, 22, 13, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(21, 10, 21, 9, 0, 0.99, ILfs.BIFURCATION, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(19, 10, 19, 9, 16, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(20, 25, 20, 26, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(ILfs.FALSE, minutiaHelper.updateMinutiaeV2(minutiae,
+                minutiaHelper.createMinutia(45, 10, 45, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+        assertEquals(6, minutiae.get().getNum());
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-18).when(helper).removeMinutia(anyInt(), any());
+        AtomicReference<Minutiae> single = newMinutiaeList(10);
+        helper.updateMinutiaeV2(single, minutiaHelper.createMinutia(20, 10, 20, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0),
+                ILfs.SCAN_HORIZONTAL, 0, image, 60, 30, lfsParamsV1());
+        assertEquals(-18, helper.updateMinutiaeV2(single,
+                minutiaHelper.createMinutia(23, 10, 23, 9, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0), ILfs.SCAN_HORIZONTAL, 0,
+                image, 60, 30, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies that sortMinutiaeLeftToRightAndThenTopToBottom returns the sort error and
+     * leaves the list order untouched.
+     */
+    @Test
+    void sortMinutiaeLeftToRightPropagatesSortError() {
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        Sort sort = mock(Sort.class);
+        when(sort.sortIndicesIntArrayIncremental(any(), any(), anyInt())).thenReturn(-60);
+        doReturn(sort).when(helper).getSort();
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(2);
+        Minutia right = minutiaHelper.createMinutia(9, 1, 9, 0, 0, 0.99, 1, 1, 0);
+        Minutia left = minutiaHelper.createMinutia(1, 1, 1, 0, 0, 0.99, 1, 1, 0);
+        minutiae.get().getList().add(right);
+        minutiae.get().getList().add(left);
+        minutiae.get().setNum(2);
+
+        assertEquals(-60, helper.sortMinutiaeLeftToRightAndThenTopToBottom(minutiae, 10, 10));
+        assertSame(right, minutiae.get().getList().get(0));
+    }
+
+    // ------------------------------------------------------------------------
+    // removeRedundantMinutiae / removeMinutia / freeMinutiae
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that removeRedundantMinutiae only removes exact coordinate duplicates
+     * and propagates a removal error.
+     */
+    @Test
+    void removeRedundantMinutiaeKeepsSameColumnAndPropagatesError() {
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        minutiae.get().getList().add(minutiaHelper.createMinutia(5, 5, 5, 4, 0, 0.99, 1, 1, 0));
+        minutiae.get().getList().add(minutiaHelper.createMinutia(5, 9, 5, 8, 0, 0.99, 1, 1, 0));
+        minutiae.get().getList().add(minutiaHelper.createMinutia(5, 9, 5, 8, 0, 0.99, 0, 1, 0));
+        minutiae.get().setNum(3);
+
+        assertEquals(ILfs.FALSE, minutiaHelper.removeRedundantMinutiae(minutiae));
+        assertEquals(2, minutiae.get().getNum());
+        assertEquals(9, minutiae.get().getList().get(1).getY());
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-19).when(helper).removeMinutia(anyInt(), any());
+        minutiae.get().getList().add(minutiaHelper.createMinutia(5, 9, 5, 8, 0, 0.99, 1, 1, 0));
+        minutiae.get().setNum(3);
+        assertEquals(-19, helper.removeRedundantMinutiae(minutiae));
+    }
+
+    /**
+     * Verifies the range check of removeMinutia. Because it combines its two conditions
+     * with AND, only a list with a negative count can trigger the error code.
+     */
+    @Test
+    void removeMinutiaRangeCheckOnlyTriggersForNegativeCount() {
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(1);
+        minutiae.get().setNum(-5);
+        assertEquals(ILfs.ERROR_CODE_380, minutiaHelper.removeMinutia(-1, minutiae));
+    }
+
+    /**
+     * Verifies that freeMinutiae accepts a null reference and clears a populated list.
+     */
+    @Test
+    void freeMinutiaeHandlesNullAndPopulatedLists() {
+        assertDoesNotThrow(() -> minutiaHelper.freeMinutiae(null));
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(2);
+        minutiae.get().getList().add(minutiaHelper.createMinutia(1, 1, 1, 0, 0, 0.99, 1, 1, 0));
+        minutiae.get().setNum(1);
+        minutiaHelper.freeMinutiae(minutiae);
+        assertNull(minutiae.get());
+    }
+
+    // ------------------------------------------------------------------------
+    // dump helpers
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies the text written by dumpMinutiae for a disappearing bifurcation with a neighbor.
+     */
+    @Test
+    void dumpMinutiaeWritesTypeAppearanceAndNeighbors(@TempDir Path tempDir) throws Exception {
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(2);
+        Minutia bifurcation = minutiaHelper.createMinutia(3, 4, 3, 5, 7, 0.5, ILfs.BIFURCATION, ILfs.DISAPPEARING, 2);
+        Minutia ending = minutiaHelper.createMinutia(9, 8, 9, 7, 1, 0.99, ILfs.RIDGE_ENDING, ILfs.APPEARING, 0);
+        bifurcation.setNbrs(new AtomicIntegerArray(new int[] { 1 }));
+        bifurcation.setRidgeCounts(new AtomicIntegerArray(new int[] { 0 }));
+        bifurcation.setNumNbrs(1);
+        minutiae.get().getList().add(bifurcation);
+        minutiae.get().getList().add(ending);
+        minutiae.get().setNum(2);
+        File file = tempDir.resolve("minutiae.txt").toFile();
+
+        minutiaHelper.dumpMinutiae(file, minutiae);
+
+        String text = Files.readString(file.toPath());
+        assertTrue(text.startsWith("2 Minutiae Detected"));
+        assertTrue(text.contains("BIF : DIS : 2 "));
+        assertTrue(text.contains("RIG : APP : 0 "));
+        assertTrue(text.contains(": 9,8; "));
+    }
+
+    /**
+     * Verifies that the dump helpers only report minutiae matching the requested reliability
+     * and swallow I/O errors when the target is a directory.
+     */
+    @Test
+    void dumpHelpersFilterReliabilityAndHandleIoErrors(@TempDir Path tempDir) throws Exception {
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(2);
+        minutiae.get().getList().add(minutiaHelper.createMinutia(3, 4, 3, 5, 7, 0.5, 0, 0, 2));
+        minutiae.get().getList().add(minutiaHelper.createMinutia(9, 8, 9, 7, 1, 0.99, 1, 1, 0));
+        minutiae.get().setNum(2);
+        File file = tempDir.resolve("reliable.txt").toFile();
+
+        minutiaHelper.dumpReliableMinutiaePoints(file, minutiae, 0.99);
+        assertEquals("19 8", Files.readString(file.toPath()));
+
+        File directory = tempDir.toFile();
+        assertDoesNotThrow(() -> minutiaHelper.dumpMinutiae(directory, minutiae));
+        assertDoesNotThrow(() -> minutiaHelper.dumpMinutiaePoints(directory, minutiae));
+        assertDoesNotThrow(() -> minutiaHelper.dumpReliableMinutiaePoints(directory, minutiae, 0.99));
+        assertTrue(directory.isDirectory());
+    }
+
+    // ------------------------------------------------------------------------
+    // joinMinutia
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that joining two bifurcations draws a white line with black boundary pixels.
+     */
+    @Test
+    void joinMinutiaBifurcationsDrawsWhiteLineWithBlackBoundary() {
+        int w = 20;
+        int h = 11;
+        int[] image = new int[w * h];
+        Arrays.fill(image, 5);
+        Minutia first = minutiaHelper.createMinutia(2, 5, 2, 4, 0, 0.99, ILfs.BIFURCATION, 1, 0);
+        Minutia second = minutiaHelper.createMinutia(12, 5, 12, 4, 0, 0.99, ILfs.BIFURCATION, 1, 0);
+
+        assertEquals(ILfs.FALSE, minutiaHelper.joinMinutia(first, second, image, w, h, 1, 1));
+
+        for (int x = 3; x <= 11; x++) {
+            assertEquals(0, image[5 * w + x]);
+            assertEquals(0, image[4 * w + x]);
+            assertEquals(0, image[6 * w + x]);
+            assertEquals(1, image[3 * w + x]);
+            assertEquals(1, image[7 * w + x]);
+            assertEquals(5, image[2 * w + x]);
+        }
+        // End points themselves are not redrawn.
+        assertEquals(5, image[5 * w + 2]);
+        assertEquals(5, image[5 * w + 12]);
+    }
+
+    /**
+     * Verifies that a steep join widens left/right and that pixels outside the image are skipped.
+     */
+    @Test
+    void joinMinutiaClipsWidthAndBoundaryAtImageEdges() {
+        // Steep line in a 3 pixel wide image: width pixels at x=-1 and x=3 are clipped.
+        int[] narrow = new int[3 * 12];
+        Minutia top = minutiaHelper.createMinutia(1, 0, 1, 1, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+        Minutia bottom = minutiaHelper.createMinutia(1, 11, 1, 10, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+        assertEquals(ILfs.FALSE, minutiaHelper.joinMinutia(top, bottom, narrow, 3, 12, 1, 2));
+        for (int y = 1; y <= 10; y++) {
+            assertEquals(1, narrow[y * 3]);
+            assertEquals(1, narrow[y * 3 + 1]);
+            assertEquals(1, narrow[y * 3 + 2]);
+        }
+
+        // Flat line in a 3 pixel tall image: width pixels at y=-1 and y=3 are clipped.
+        int[] flat = new int[12 * 3];
+        Minutia left = minutiaHelper.createMinutia(0, 1, 0, 0, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+        Minutia right = minutiaHelper.createMinutia(11, 1, 11, 0, 0, 0.99, ILfs.RIDGE_ENDING, 1, 0);
+        assertEquals(ILfs.FALSE, minutiaHelper.joinMinutia(left, right, flat, 12, 3, 1, 2));
+        for (int x = 1; x <= 10; x++) {
+            assertEquals(1, flat[x]);
+            assertEquals(1, flat[12 + x]);
+            assertEquals(1, flat[24 + x]);
+        }
+    }
+
+    /**
+     * Verifies that joinMinutia returns the line-points error without touching the image.
+     */
+    @Test
+    void joinMinutiaPropagatesLinePointsError() {
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        Line line = mock(Line.class);
+        when(line.linePoints(any(), any(), any(), anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(-20);
+        doReturn(line).when(helper).getLine();
+        int[] image = new int[100];
+
+        assertEquals(-20, helper.joinMinutia(minutiaHelper.createMinutia(1, 1, 1, 0, 0, 0.99, 1, 1, 0),
+                minutiaHelper.createMinutia(8, 8, 8, 7, 0, 0.99, 1, 1, 0), image, 10, 10, 1, 1));
+        assertTrue(Arrays.stream(image).allMatch(p -> p == 0));
+    }
+
+    // ------------------------------------------------------------------------
+    // scanForMinutiae / rescans (V1)
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies that scanForMinutiae propagates errors from each primary scan and rescan step.
+     */
+    @Test
+    void scanForMinutiaePropagatesScanAndRescanErrors() {
+        AtomicIntegerArray imap = new AtomicIntegerArray(new int[] { 0 });
+        AtomicIntegerArray nmap = new AtomicIntegerArray(new int[] { 0 });
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+
+        doReturn(-21).when(helper).scanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-21, helper.scanForMinutiae(newMinutiaeList(1), new int[100], 10, 10, imap, nmap, 0, 0, 1, 1, 0,
+                0, 10, 10, ILfs.SCAN_HORIZONTAL, lfsParamsV1()));
+
+        doReturn(ILfs.FALSE).when(helper).scanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), any());
+        doReturn(-22).when(helper).rescanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), any(), any(),
+                anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-22, helper.scanForMinutiae(newMinutiaeList(1), new int[100], 10, 10, imap, nmap, 0, 0, 1, 1, 0,
+                0, 10, 10, ILfs.SCAN_HORIZONTAL, lfsParamsV1()));
+
+        doReturn(-23).when(helper).scanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-23, helper.scanForMinutiae(newMinutiaeList(1), new int[100], 10, 10, imap, nmap, 0, 0, 1, 1, 0,
+                0, 10, 10, ILfs.SCAN_VERTICAL, lfsParamsV1()));
+
+        doReturn(ILfs.FALSE).when(helper).scanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), any());
+        doReturn(-24).when(helper).rescanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), any(), any(),
+                anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-24, helper.scanForMinutiae(newMinutiaeList(1), new int[100], 10, 10, imap, nmap, 0, 0, 1, 1, 0,
+                0, 10, 10, ILfs.SCAN_VERTICAL, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies a full V1 block scan in both orientations on real data when every neighbor
+     * block has a horizontal-scan direction (a zero-width region keeps the vertical scan in range).
+     */
+    @Test
+    void scanForMinutiaeScansRealBlockInBothOrientations() throws Exception {
+        RealImageFixture f = realImage();
+        AtomicIntegerArray imap = new AtomicIntegerArray(9);
+        AtomicIntegerArray nmap = new AtomicIntegerArray(9);
+
+        AtomicReference<Minutiae> horizontal = newMinutiaeList(ILfs.MAX_MINUTIAE);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiae(horizontal, f.binaryImage.clone(), f.width, f.height,
+                imap, nmap, 1, 1, 3, 3, 0, 0, f.width, f.height, ILfs.SCAN_HORIZONTAL, lfsParamsV1()));
+        assertTrue(horizontal.get().getNum() > 0);
+
+        AtomicReference<Minutiae> vertical = newMinutiaeList(ILfs.MAX_MINUTIAE);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiae(vertical, f.binaryImage.clone(), f.width, f.height,
+                imap, nmap, 1, 1, 3, 3, 100, 100, 0, 24, ILfs.SCAN_VERTICAL, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies that each of the four partial horizontal rescans, and the high-curvature full
+     * rescan, stop rescanForMinutiaeHorizontally with their error code.
+     */
+    @Test
+    void rescanForMinutiaeHorizontallyPropagatesErrors() {
+        AtomicIntegerArray imap = new AtomicIntegerArray(new int[] { 0 });
+        AtomicIntegerArray lowCurveNmap = new AtomicIntegerArray(new int[] { 0 });
+        AtomicIntegerArray highCurveNmap = new AtomicIntegerArray(new int[] { ILfs.HIGH_CURVATURE });
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-25).when(helper).scanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-25, helper.rescanForMinutiaeHorizontally(newMinutiaeList(1), new int[100], 10, 10, imap,
+                highCurveNmap, 0, 0, 1, 1, 0, 0, 10, 10, lfsParamsV1()));
+
+        int[] directions = { ILfs.NORTH, ILfs.EAST, ILfs.SOUTH, ILfs.WEST };
+        for (int failing = 0; failing < directions.length; failing++) {
+            MinutiaHelper partial = Mockito.spy(minutiaHelper);
+            doReturn(ILfs.FALSE).when(partial).rescanPartialHorizontally(anyInt(), any(), any(), anyInt(), anyInt(),
+                    any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                    any());
+            doReturn(-30 - failing).when(partial).rescanPartialHorizontally(eq(directions[failing]), any(), any(),
+                    anyInt(), anyInt(), any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                    anyInt(), anyInt(), any());
+            assertEquals(-30 - failing, partial.rescanForMinutiaeHorizontally(newMinutiaeList(1), new int[100], 10,
+                    10, imap, lowCurveNmap, 0, 0, 1, 1, 0, 0, 10, 10, lfsParamsV1()));
+        }
+    }
+
+    /**
+     * Verifies that each of the four partial vertical rescans, and the high-curvature full
+     * rescan, stop rescanForMinutiaeVertically with their error code.
+     */
+    @Test
+    void rescanForMinutiaeVerticallyPropagatesErrors() {
+        AtomicIntegerArray imap = new AtomicIntegerArray(new int[] { 0 });
+        AtomicIntegerArray lowCurveNmap = new AtomicIntegerArray(new int[] { 0 });
+        AtomicIntegerArray highCurveNmap = new AtomicIntegerArray(new int[] { ILfs.HIGH_CURVATURE });
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        doReturn(-26).when(helper).scanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-26, helper.rescanForMinutiaeVertically(newMinutiaeList(1), new int[100], 10, 10, imap,
+                highCurveNmap, 0, 0, 1, 1, 0, 0, 10, 10, lfsParamsV1()));
+
+        int[] directions = { ILfs.NORTH, ILfs.EAST, ILfs.SOUTH, ILfs.WEST };
+        for (int failing = 0; failing < directions.length; failing++) {
+            MinutiaHelper partial = Mockito.spy(minutiaHelper);
+            doReturn(ILfs.FALSE).when(partial).rescanPartialVertically(anyInt(), any(), any(), anyInt(), anyInt(),
+                    any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                    any());
+            doReturn(-40 - failing).when(partial).rescanPartialVertically(eq(directions[failing]), any(), any(),
+                    anyInt(), anyInt(), any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                    anyInt(), anyInt(), any());
+            assertEquals(-40 - failing, partial.rescanForMinutiaeVertically(newMinutiaeList(1), new int[100], 10,
+                    10, imap, lowCurveNmap, 0, 0, 1, 1, 0, 0, 10, 10, lfsParamsV1()));
+        }
+    }
+
+    /**
+     * Verifies rescanPartialHorizontally: bad neighbor direction, invalid or vertically oriented
+     * neighbor (no rescan), the adjusted rescan region, and adjust/scan error propagation.
+     */
+    @Test
+    void rescanPartialHorizontallyCoversNeighborCases() {
+        // 2x1 block map: block 0 is scanned, block 1 is its EAST neighbor.
+        AtomicIntegerArray nmap = new AtomicIntegerArray(new int[] { 5, 0 });
+        int[] image = new int[48 * 24];
+
+        assertEquals(ILfs.ERROR_CODE_200, minutiaHelper.rescanPartialHorizontally(99, newMinutiaeList(1), image, 48,
+                24, new AtomicIntegerArray(new int[] { 5, 0 }), nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        assertEquals(ILfs.FALSE, helper.rescanPartialHorizontally(ILfs.EAST, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, ILfs.INVALID_DIR }), nmap, 0, 0, 2, 1, 0, 0, 24, 24,
+                lfsParamsV1()));
+        assertEquals(ILfs.FALSE, helper.rescanPartialHorizontally(ILfs.EAST, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, 8 }), nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+        verify(helper, never()).scanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+
+        AtomicIntegerArray imap = new AtomicIntegerArray(new int[] { 5, 0 });
+        assertEquals(ILfs.FALSE, helper.rescanPartialHorizontally(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap,
+                nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+        // EAST rescan: right half of the block, passing the block's own IMAP/NMAP values.
+        verify(helper).scanForMinutiaeHorizontally(any(), any(), eq(48), eq(24), eq(5), eq(5), eq(12), eq(0), eq(12),
+                eq(24), any());
+
+        doReturn(-27).when(helper).adjustHorizontalRescan(anyInt(), any(), any(), any(), any(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt());
+        assertEquals(-27, helper.rescanPartialHorizontally(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap, nmap,
+                0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+
+        MinutiaHelper scanFails = Mockito.spy(minutiaHelper);
+        doReturn(-28).when(scanFails).scanForMinutiaeHorizontally(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-28, scanFails.rescanPartialHorizontally(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap,
+                nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies rescanPartialVertically: bad or missing neighbor, invalid or horizontally oriented
+     * neighbor (no rescan), the adjusted rescan region, and adjust/scan error propagation.
+     */
+    @Test
+    void rescanPartialVerticallyCoversNeighborCases() {
+        AtomicIntegerArray nmap = new AtomicIntegerArray(new int[] { 5, 0 });
+        int[] image = new int[48 * 24];
+
+        assertEquals(ILfs.ERROR_CODE_200, minutiaHelper.rescanPartialVertically(99, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, 8 }), nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+        assertEquals(ILfs.FALSE, minutiaHelper.rescanPartialVertically(ILfs.WEST, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, 8 }), nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+
+        MinutiaHelper helper = Mockito.spy(minutiaHelper);
+        assertEquals(ILfs.FALSE, helper.rescanPartialVertically(ILfs.EAST, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, ILfs.INVALID_DIR }), nmap, 0, 0, 2, 1, 0, 0, 24, 24,
+                lfsParamsV1()));
+        assertEquals(ILfs.FALSE, helper.rescanPartialVertically(ILfs.EAST, newMinutiaeList(1), image, 48, 24,
+                new AtomicIntegerArray(new int[] { 5, 0 }), nmap, 0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+        verify(helper, never()).scanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+
+        // A zero-width block keeps the (leftward walking) vertical scan inside the image.
+        AtomicIntegerArray imap = new AtomicIntegerArray(new int[] { 5, 8 });
+        assertEquals(ILfs.FALSE, helper.rescanPartialVertically(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap,
+                nmap, 0, 0, 2, 1, 4, 0, 0, 24, lfsParamsV1()));
+        verify(helper).scanForMinutiaeVertically(any(), any(), eq(48), eq(24), eq(5), eq(5), eq(4), eq(0), eq(0),
+                eq(24), any());
+
+        doReturn(-29).when(helper).adjustVerticalRescan(anyInt(), any(), any(), any(), any(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt());
+        assertEquals(-29, helper.rescanPartialVertically(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap, nmap, 0,
+                0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+
+        MinutiaHelper scanFails = Mockito.spy(minutiaHelper);
+        doReturn(-30).when(scanFails).scanForMinutiaeVertically(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(),
+                anyInt(), anyInt(), anyInt(), anyInt(), any());
+        assertEquals(-30, scanFails.rescanPartialVertically(ILfs.EAST, newMinutiaeList(1), image, 48, 24, imap, nmap,
+                0, 0, 2, 1, 0, 0, 24, 24, lfsParamsV1()));
+    }
+
+    /**
+     * Verifies the rescan regions computed by adjustHorizontalRescan and adjustVerticalRescan
+     * for every neighbor direction, and the illegal-direction error codes.
+     */
+    @Test
+    void adjustRescanRegionsForAllNeighborDirections() {
+        AtomicInteger x = new AtomicInteger();
+        AtomicInteger y = new AtomicInteger();
+        AtomicInteger w = new AtomicInteger();
+        AtomicInteger h = new AtomicInteger();
+
+        // Horizontal rescans: quarter-block strips N/S, half-block strips E/W (blocksize 24).
+        minutiaHelper.adjustHorizontalRescan(ILfs.NORTH, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 72, 24, 6), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustHorizontalRescan(ILfs.EAST, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(60, 72, 12, 24), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustHorizontalRescan(ILfs.SOUTH, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 90, 24, 6), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustHorizontalRescan(ILfs.WEST, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 72, 12, 24), List.of(x.get(), y.get(), w.get(), h.get()));
+        assertEquals(ILfs.ERROR_CODE_210, minutiaHelper.adjustHorizontalRescan(3, x, y, w, h, 48, 72, 24, 24, 24));
+
+        // Vertical rescans: half-block strips N/S, quarter-block strips E/W.
+        minutiaHelper.adjustVerticalRescan(ILfs.NORTH, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 72, 24, 12), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustVerticalRescan(ILfs.EAST, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(66, 72, 6, 24), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustVerticalRescan(ILfs.SOUTH, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 84, 24, 12), List.of(x.get(), y.get(), w.get(), h.get()));
+        minutiaHelper.adjustVerticalRescan(ILfs.WEST, x, y, w, h, 48, 72, 24, 24, 24);
+        assertEquals(List.of(48, 72, 6, 24), List.of(x.get(), y.get(), w.get(), h.get()));
+        assertEquals(ILfs.ERROR_CODE_220, minutiaHelper.adjustVerticalRescan(3, x, y, w, h, 48, 72, 24, 24, 24));
+    }
+
+    /**
+     * Verifies the V1 vertical scan walks its columns left to right, detects the horizontal ridge
+     * ending and completes normally. A zero-width region returns immediately.
+     */
+    @Test
+    void scanForMinutiaeVerticallyDetectsRidgeEndingAndCompletes() {
+        int w = 20;
+        int h = 20;
+        int[] image = new int[w * h];
+        fillRect(image, w, 0, 10, 9, 12, 1);
+
+        AtomicReference<Minutiae> empty = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiaeVertically(empty, image, w, h, 0, 0, 9, 0, 0, h,
+                lfsParamsV1()));
+        assertEquals(0, empty.get().getNum());
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.scanForMinutiaeVertically(minutiae, image, w, h, 0, 0, 9, 0, 5, h,
+                lfsParamsV1()));
+        assertTrue(minutiae.get().getNum() >= 1);
+        Minutia ending = minutiae.get().getList().get(0);
+        assertEquals(ILfs.RIDGE_ENDING, ending.getType());
+        assertEquals(ILfs.DISAPPEARING, ending.getAppearing());
+        assertEquals(9, ending.getX());
+        assertEquals(10, ending.getEx());
+    }
+
+    // ------------------------------------------------------------------------
+    // process*ScanMinutia (V1 and V2)
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies processHorizontalScanMinutiaV2 location, direction and reliability for
+     * appearing/disappearing features, low-flow blocks and INVALID direction blocks.
+     */
+    @Test
+    void processHorizontalScanMinutiaV2LowCurvatureCases() {
+        int w = 30;
+        int h = 30;
+        int[] image = new int[w * h];
+        AtomicIntegerArray dir = filledMap(w * h, 4);
+        AtomicIntegerArray noFlag = filledMap(w * h, 0);
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutiaV2(minutiae, 12, 5, 8, 0, image, w, h, dir,
+                noFlag, noFlag, lfsParamsV2()));
+        Minutia appearing = minutiae.get().getList().get(0);
+        assertEquals(List.of(10, 6, 10, 5, 20), List.of(appearing.getX(), appearing.getY(), appearing.getEx(),
+                appearing.getEy(), appearing.getDirection()));
+        assertEquals(ILfs.HIGH_RELIABILITY, appearing.getReliability());
+
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutiaV2(minutiae, 22, 20, 18, 1, image, w, h,
+                dir, filledMap(w * h, ILfs.TRUE), noFlag, lfsParamsV2()));
+        Minutia disappearing = minutiae.get().getList().get(1);
+        assertEquals(List.of(20, 20, 20, 21, 4), List.of(disappearing.getX(), disappearing.getY(),
+                disappearing.getEx(), disappearing.getEy(), disappearing.getDirection()));
+        assertEquals(ILfs.MEDIUM_RELIABILITY, disappearing.getReliability());
+
+        // Duplicate point is ignored by updateMinutiaeV2 but the call still succeeds.
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutiaV2(minutiae, 12, 5, 8, 0, image, w, h, dir,
+                noFlag, noFlag, lfsParamsV2()));
+        assertEquals(2, minutiae.get().getNum());
+
+        assertEquals(ILfs.IGNORE, minutiaHelper.processHorizontalScanMinutiaV2(minutiae, 12, 5, 8, 0, image, w, h,
+                filledMap(w * h, ILfs.INVALID_DIR), noFlag, noFlag, lfsParamsV2()));
+        assertEquals(2, minutiae.get().getNum());
+    }
+
+    /**
+     * Verifies processVerticalScanMinutiaV2 location, direction and reliability for
+     * appearing/disappearing features, low-flow blocks and INVALID direction blocks.
+     */
+    @Test
+    void processVerticalScanMinutiaV2LowCurvatureCases() {
+        int w = 30;
+        int h = 30;
+        int[] image = new int[w * h];
+        AtomicIntegerArray dir = filledMap(w * h, 4);
+        AtomicIntegerArray noFlag = filledMap(w * h, 0);
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutiaV2(minutiae, 5, 12, 8, 0, image, w, h, dir,
+                noFlag, noFlag, lfsParamsV2()));
+        Minutia appearing = minutiae.get().getList().get(0);
+        assertEquals(List.of(6, 10, 5, 10, 4), List.of(appearing.getX(), appearing.getY(), appearing.getEx(),
+                appearing.getEy(), appearing.getDirection()));
+        assertEquals(ILfs.HIGH_RELIABILITY, appearing.getReliability());
+
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutiaV2(minutiae, 20, 22, 18, 1, image, w, h, dir,
+                filledMap(w * h, ILfs.TRUE), noFlag, lfsParamsV2()));
+        Minutia disappearing = minutiae.get().getList().get(1);
+        assertEquals(List.of(20, 20, 21, 20, 20), List.of(disappearing.getX(), disappearing.getY(),
+                disappearing.getEx(), disappearing.getEy(), disappearing.getDirection()));
+        assertEquals(ILfs.MEDIUM_RELIABILITY, disappearing.getReliability());
+
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutiaV2(minutiae, 5, 12, 8, 0, image, w, h, dir,
+                noFlag, noFlag, lfsParamsV2()));
+        assertEquals(2, minutiae.get().getNum());
+
+        assertEquals(ILfs.IGNORE, minutiaHelper.processVerticalScanMinutiaV2(minutiae, 5, 12, 8, 0, image, w, h,
+                filledMap(w * h, ILfs.INVALID_DIR), noFlag, noFlag, lfsParamsV2()));
+    }
+
+    /**
+     * Verifies the high-curvature path of both V2 process methods: a ridge tip is kept at the
+     * tip with its inward direction, while a point on a straight edge is ignored.
+     */
+    @Test
+    void processScanMinutiaV2HighCurvatureCases() {
+        int w = 50;
+        int h = 50;
+        AtomicIntegerArray dir = filledMap(w * h, 4);
+        AtomicIntegerArray noFlag = filledMap(w * h, 0);
+        AtomicIntegerArray highCurve = filledMap(w * h, ILfs.TRUE);
+
+        // Vertical bar x=21..23 with its tip at y=20, detected by a horizontal scan.
+        int[] verticalBar = new int[w * h];
+        fillRect(verticalBar, w, 21, 20, 23, 45, 1);
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutiaV2(minutiae, 23, 19, 21, 0, verticalBar, w,
+                h, dir, noFlag, highCurve, lfsParamsV2()));
+        Minutia tip = minutiae.get().getList().get(0);
+        assertEquals(List.of(22, 20, 22, 19, 16), List.of(tip.getX(), tip.getY(), tip.getEx(), tip.getEy(),
+                tip.getDirection()));
+
+        // Horizontal bar y=21..23 with its tip at x=20, detected by a vertical scan.
+        int[] horizontalBar = new int[w * h];
+        fillRect(horizontalBar, w, 20, 21, 45, 23, 1);
+        AtomicReference<Minutiae> vertical = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutiaV2(vertical, 19, 23, 21, 0, horizontalBar, w,
+                h, dir, noFlag, highCurve, lfsParamsV2()));
+        Minutia leftTip = vertical.get().getList().get(0);
+        assertEquals(List.of(20, 22, 8), List.of(leftTip.getX(), leftTip.getY(), leftTip.getDirection()));
+
+        // Straight edges are not high-curvature features.
+        int[] block = new int[w * h];
+        fillRect(block, w, 5, 20, 45, 45, 1);
+        assertEquals(ILfs.IGNORE, minutiaHelper.processHorizontalScanMinutiaV2(newMinutiaeList(10), 25, 19, 25, 0,
+                block, w, h, dir, noFlag, highCurve, lfsParamsV2()));
+        int[] leftEdge = new int[w * h];
+        fillRect(leftEdge, w, 20, 5, 45, 45, 1);
+        assertEquals(ILfs.IGNORE, minutiaHelper.processVerticalScanMinutiaV2(newMinutiaeList(10), 19, 25, 25, 0,
+                leftEdge, w, h, dir, noFlag, highCurve, lfsParamsV2()));
+    }
+
+    /**
+     * Verifies the V1 process methods in low- and high-curvature blocks: tips are kept with
+     * default reliability, straight edges in high-curvature blocks are ignored.
+     */
+    @Test
+    void processScanMinutiaV1CurvatureCases() {
+        int w = 50;
+        int h = 50;
+        int[] verticalBar = new int[w * h];
+        fillRect(verticalBar, w, 21, 20, 23, 45, 1);
+
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutia(minutiae, 23, 19, 21, 0, verticalBar, w,
+                h, 4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+        Minutia tip = minutiae.get().getList().get(0);
+        assertEquals(List.of(22, 20, 16), List.of(tip.getX(), tip.getY(), tip.getDirection()));
+        assertEquals(ILfs.DEFAULT_RELIABILITY, tip.getReliability());
+        // Same tip again is ignored by updateMinutiae.
+        assertEquals(ILfs.FALSE, minutiaHelper.processHorizontalScanMinutia(minutiae, 23, 19, 21, 0, verticalBar, w,
+                h, 4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+        assertEquals(1, minutiae.get().getNum());
+
+        int[] block = new int[w * h];
+        fillRect(block, w, 5, 20, 45, 45, 1);
+        assertEquals(ILfs.IGNORE, minutiaHelper.processHorizontalScanMinutia(newMinutiaeList(10), 25, 19, 25, 0, block,
+                w, h, 4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+
+        int[] leftEdge = new int[w * h];
+        fillRect(leftEdge, w, 20, 5, 45, 45, 1);
+        assertEquals(ILfs.IGNORE, minutiaHelper.processVerticalScanMinutia(newMinutiaeList(10), 19, 25, 25, 0,
+                leftEdge, w, h, 4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+
+        int[] horizontalBar = new int[w * h];
+        fillRect(horizontalBar, w, 20, 21, 45, 23, 1);
+        AtomicReference<Minutiae> vertical = newMinutiaeList(10);
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutia(vertical, 19, 23, 21, 0, horizontalBar, w, h,
+                4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+        assertEquals(1, vertical.get().getNum());
+        assertEquals(20, vertical.get().getList().get(0).getX());
+        assertEquals(ILfs.FALSE, minutiaHelper.processVerticalScanMinutia(vertical, 19, 23, 21, 0, horizontalBar, w, h,
+                4, ILfs.HIGH_CURVATURE, lfsParamsV1()));
+        assertEquals(1, vertical.get().getNum());
+    }
+
+    // ------------------------------------------------------------------------
+    // adjustHighCurvatureMinutia (V1 and V2)
+    // ------------------------------------------------------------------------
+
+    /**
+     * Verifies adjustHighCurvatureMinutia outcomes on synthetic shapes: a thin ridge tip is
+     * accepted, a straight edge and a thin valley tip are rejected, and small loops are ignored
+     * (a counter-clockwise blob loop is filled in).
+     */
+    @Test
+    void adjustHighCurvatureMinutiaOnSyntheticShapes() {
+        assertHighCurvatureShapes(false);
+    }
+
+    /**
+     * Verifies adjustHighCurvatureMinutiaV2 outcomes on the same synthetic shapes as V1.
+     */
+    @Test
+    void adjustHighCurvatureMinutiaV2OnSyntheticShapes() {
+        assertHighCurvatureShapes(true);
+    }
+
+    /**
+     * Verifies that both adjustHighCurvatureMinutia variants propagate contour and loop errors.
+     */
+    @Test
+    void adjustHighCurvatureMinutiaPropagatesContourAndLoopErrors() {
+        for (boolean v2 : new boolean[] { false, true }) {
+            MinutiaHelper helper = Mockito.spy(minutiaHelper);
+            Contour contour = Mockito.spy(Contour.getInstance());
+            doReturn(contour).when(helper).getContour();
+            doAnswer(inv -> {
+                ((AtomicInteger) inv.getArgument(0)).set(-51);
+                return null;
+            }).when(contour).getHighCurvatureContour(any(), any(), anyInt(), anyInt(), anyInt(), anyInt(), anyInt(),
+                    any(), anyInt(), anyInt());
+            assertEquals(-51, adjust(helper, v2, thinBarImage(), 30, 22, 31, 22));
+
+            MinutiaHelper thetaHelper = Mockito.spy(minutiaHelper);
+            Contour thetaContour = Mockito.spy(Contour.getInstance());
+            doReturn(thetaContour).when(thetaHelper).getContour();
+            doReturn(-52).when(thetaContour).minContourTheta(any(), any(), anyInt(), any(), any(), anyInt());
+            assertEquals(-52, adjust(thetaHelper, v2, thinBarImage(), 30, 22, 31, 22));
+
+            MinutiaHelper loopHelper = Mockito.spy(minutiaHelper);
+            Loop loop = mock(Loop.class);
+            doReturn(loop).when(loopHelper).getLoop();
+            when(loop.isLoopClockwise(any(), any(), anyInt(), anyInt())).thenReturn(-53);
+            assertEquals(-53, adjust(loopHelper, v2, blobImage(), 20, 20, 19, 20));
+
+            when(loop.isLoopClockwise(any(), any(), anyInt(), anyInt())).thenReturn(ILfs.FALSE);
+            when(loop.processLoop(any(), any(), any(), any(), any(), anyInt(), any(), anyInt(), anyInt(), any()))
+                    .thenReturn(-54);
+            when(loop.processLoopV2(any(), any(), any(), any(), any(), anyInt(), any(), anyInt(), anyInt(), any(),
+                    any())).thenReturn(-54);
+            assertEquals(-54, adjust(loopHelper, v2, blobImage(), 20, 20, 19, 20));
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Helpers for the tests above
+    // ------------------------------------------------------------------------
+
+    private void assertHighCurvatureShapes(boolean v2) {
+        AtomicInteger dir = new AtomicInteger();
+        AtomicInteger x = new AtomicInteger();
+        AtomicInteger y = new AtomicInteger();
+        AtomicInteger ex = new AtomicInteger();
+        AtomicInteger ey = new AtomicInteger();
+        AtomicReference<Minutiae> minutiae = newMinutiaeList(10);
+
+        int ret = v2
+                ? minutiaHelper.adjustHighCurvatureMinutiaV2(dir, x, y, ex, ey, 30, 22, 31, 22, thinBarImage(), 60, 50,
+                        filledMap(60 * 50, 0), minutiae, lfsParamsV2())
+                : minutiaHelper.adjustHighCurvatureMinutia(dir, x, y, ex, ey, 30, 22, 31, 22, thinBarImage(), 60, 50,
+                        minutiae, lfsParamsV1());
+        assertEquals(ILfs.FALSE, ret);
+        assertEquals(List.of(24, 30, 22, 31, 22), List.of(dir.get(), x.get(), y.get(), ex.get(), ey.get()));
+
+        int[] straight = new int[60 * 50];
+        fillRect(straight, 60, 5, 20, 55, 45, 1);
+        assertEquals(ILfs.IGNORE, adjust(minutiaHelper, v2, straight, 30, 20, 30, 19));
+
+        // One pixel wide white slit in a black field: interior midpoint is white, feature is black.
+        int[] slit = new int[60 * 50];
+        Arrays.fill(slit, 1);
+        fillRect(slit, 60, 0, 25, 30, 25, 0);
+        assertEquals(ILfs.IGNORE, adjust(minutiaHelper, v2, slit, 31, 25, 30, 25));
+
+        // 3x3 white hole traced from the surrounding black: clockwise loop, image untouched.
+        int[] hole = new int[60 * 50];
+        Arrays.fill(hole, 1);
+        fillRect(hole, 60, 20, 20, 22, 22, 0);
+        int[] holeCopy = hole.clone();
+        assertEquals(ILfs.IGNORE, adjust(minutiaHelper, v2, hole, 19, 20, 20, 20));
+        assertTrue(Arrays.equals(holeCopy, hole));
+
+        // 3x3 black blob: counter-clockwise loop that is processed and filled.
+        int[] blob = blobImage();
+        assertEquals(ILfs.IGNORE, adjust(minutiaHelper, v2, blob, 20, 20, 19, 20));
+        assertTrue(Arrays.stream(blob).allMatch(p -> p == 0));
+    }
+
+    private int adjust(MinutiaHelper helper, boolean v2, int[] image, int xLoc, int yLoc, int xEdge, int yEdge) {
+        AtomicInteger dir = new AtomicInteger();
+        AtomicInteger x = new AtomicInteger();
+        AtomicInteger y = new AtomicInteger();
+        AtomicInteger ex = new AtomicInteger();
+        AtomicInteger ey = new AtomicInteger();
+        return v2
+                ? helper.adjustHighCurvatureMinutiaV2(dir, x, y, ex, ey, xLoc, yLoc, xEdge, yEdge, image, 60, 50,
+                        filledMap(60 * 50, 0), newMinutiaeList(10), lfsParamsV2())
+                : helper.adjustHighCurvatureMinutia(dir, x, y, ex, ey, xLoc, yLoc, xEdge, yEdge, image, 60, 50,
+                        newMinutiaeList(10), lfsParamsV1());
+    }
+
+    /** 60x50 white image with a 3 pixel thick black ridge ending at x=30. */
+    private static int[] thinBarImage() {
+        int[] image = new int[60 * 50];
+        fillRect(image, 60, 5, 21, 30, 23, 1);
+        return image;
+    }
+
+    /** 60x50 white image with a 3x3 black blob at (20..22, 20..22). */
+    private static int[] blobImage() {
+        int[] image = new int[60 * 50];
+        fillRect(image, 60, 20, 20, 22, 22, 1);
+        return image;
+    }
+
+    /** 60x30 white image with a 3 pixel thick black ridge on rows 10..12, x=5..40. */
+    private static int[] horizontalBarImage() {
+        int[] image = new int[60 * 30];
+        fillRect(image, 60, 5, 10, 40, 12, 1);
+        return image;
+    }
+
+    private static void fillRect(int[] image, int width, int x0, int y0, int x1, int y1, int value) {
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                image[y * width + x] = value;
+            }
+        }
+    }
+
+    private static AtomicIntegerArray filledMap(int size, int value) {
+        AtomicIntegerArray map = new AtomicIntegerArray(size);
+        for (int i = 0; i < size; i++) {
+            map.set(i, value);
+        }
+        return map;
+    }
+
+    private AtomicReference<Minutiae> newMinutiaeList(int alloc) {
+        AtomicReference<Minutiae> minutiae = new AtomicReference<>(new Minutiae());
+        minutiaHelper.allocMinutiae(minutiae, alloc);
+        return minutiae;
+    }
+
+    private static LfsParams lfsParamsV1() {
+        return Globals.getInstance().getLfsParams();
+    }
+
+    private static LfsParams lfsParamsV2() {
+        return Globals.getInstance().getLfsParamsV2();
+    }
+
+    /** Binarized real fingerprint (1 = ridge) with its V2 block maps and pixelized maps. */
+    private static final class RealImageFixture {
+        private int[] binaryImage;
+        private int width;
+        private int height;
+        private Maps maps;
+        private AtomicIntegerArray directionMap;
+        private AtomicIntegerArray lowFlowMap;
+        private AtomicIntegerArray highCurveMap;
+    }
+
+    private static RealImageFixture realImageFixture;
+
+    /**
+     * Builds (once) the real-image fixture from a 224x224 center crop of info_wsq.iso run through
+     * the V2 detection pipeline. A private Maps instance is used so the shared singleton is untouched,
+     * and the global log flag is restored afterwards.
+     */
+    private static synchronized RealImageFixture realImage() throws Exception {
+        if (realImageFixture != null) {
+            return realImageFixture;
+        }
+        boolean showLogs = Nist.isShowLogs();
+        Nist.setShowLogs(false);
+        try {
+            AtomicInteger rc = new AtomicInteger(-1);
+            AtomicInteger width = new AtomicInteger();
+            AtomicInteger height = new AtomicInteger();
+            BufferedImage image = ImageDecoder.getInstance().readAndDecodeGrayscaleImage(rc, "src/test/resources/info_wsq.iso",
+                    new AtomicInteger(), new AtomicInteger(), width, height, new AtomicInteger(), new AtomicInteger(),
+                    new AtomicReference<>());
+            assertEquals(ILfs.FALSE, rc.get());
+            int[] gray = org.mosip.nist.nfiq1.util.ImageUtil.convertTo1DWithoutUsingGetRGB(image, "jpg");
+
+            int size = 224;
+            int x0 = (width.get() - size) / 2;
+            int y0 = (height.get() - size) / 2;
+            int[] crop = new int[size * size];
+            for (int y = 0; y < size; y++) {
+                System.arraycopy(gray, (y + y0) * width.get() + x0, crop, y * size, size);
+            }
+
+            Constructor<Maps> ctor = Maps.class.getDeclaredConstructor();
+            ctor.setAccessible(true);
+            Maps maps = ctor.newInstance();
+            AtomicInteger ret = new AtomicInteger();
+            int[] binary = Detect.getInstance().lfsDetectMinutiaeV2(ret, new AtomicReference<>(new Minutiae()), maps,
+                    new AtomicInteger(), new AtomicInteger(), crop, size, size, lfsParamsV2());
+            assertEquals(ILfs.FALSE, ret.get());
+            ImageUtil.getInstance().grayToBinary(1, 1, 0, binary, size, size);
+
+            RealImageFixture f = new RealImageFixture();
+            f.binaryImage = binary;
+            f.width = size;
+            f.height = size;
+            f.maps = maps;
+            f.directionMap = pixelize(maps, maps.getDirectionMap(), size);
+            f.lowFlowMap = pixelize(maps, maps.getLowFlowMap(), size);
+            f.highCurveMap = pixelize(maps, maps.getHighCurveMap(), size);
+            realImageFixture = f;
+            return f;
+        } finally {
+            Nist.setShowLogs(showLogs);
+        }
+    }
+
+    private static AtomicIntegerArray pixelize(Maps maps, AtomicIntegerArray blockMap, int size) {
+        AtomicIntegerArray pixels = new AtomicIntegerArray(size * size);
+        assertEquals(ILfs.FALSE, maps.pixelizeMap(pixels, size, size, blockMap, maps.getMappedImageWidth().get(),
+                maps.getMappedImageHeight().get(), lfsParamsV2().getBlockOffsetSize()));
+        return pixels;
     }
 }

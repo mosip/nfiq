@@ -1,5 +1,11 @@
 name: Maven Package upon a push
 
+# Builds, publishes and analyses the whole Maven reactor from the repository root:
+#   io.mosip:nfiq      parent POM
+#   io.mosip:nfiq1.0   NIST NFIQ 1.0 library
+#   io.mosip:nfiq2.0   NIST NFIQ 2 library (package frfxll is LGPL-3.0-or-later, see licenses/NOTICE)
+# Versions come from the parent pom.xml only.
+
 on:
   release:
     types: [published]
@@ -22,11 +28,15 @@ on:
       - 'release*'
 
 jobs:
+  # mvn -U package on the reactor (both modules, all tests). kattu only zips executable jars by
+  # default; the two library jars are plain jars, so they are listed in MAVEN_NON_EXEC_ARTIFACTS
+  # to be uploaded as the "nfiq" build artifact.
   build-maven-nfiq:
     uses: mosip/kattu/.github/workflows/maven-build.yml@master-java21
     with:
-      SERVICE_LOCATION: ./nfiq1.0
+      SERVICE_LOCATION: ./
       BUILD_ARTIFACT: nfiq
+      MAVEN_NON_EXEC_ARTIFACTS: nfiq1.0,nfiq2.0
     secrets:
       OSSRH_USER: ${{ secrets.OSSRH_USER }}
       OSSRH_SECRET: ${{ secrets.OSSRH_SECRET }}
@@ -34,13 +44,14 @@ jobs:
       GPG_SECRET: ${{ secrets.GPG_SECRET }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
 
-
+  # mvn deploy from the root publishes the parent POM, nfiq1.0 and nfiq2.0 (jar, sources, javadoc,
+  # GPG signatures) in one run.
   publish_to_nexus:
     if: "${{ !contains(github.ref, 'master') && github.event_name != 'pull_request' }}"
     needs: build-maven-nfiq
     uses: mosip/kattu/.github/workflows/maven-publish-to-nexus.yml@master-java21
     with:
-      SERVICE_LOCATION: ./nfiq1.0
+      SERVICE_LOCATION: ./
     secrets:
       OSSRH_USER: ${{ secrets.OSSRH_USER }}
       OSSRH_SECRET: ${{ secrets.OSSRH_SECRET }}
@@ -49,12 +60,13 @@ jobs:
       GPG_SECRET: ${{ secrets.GPG_SECRET }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
 
+  # One SonarCloud project (mosip_nfiq) covering both modules via the reactor.
   sonar_analysis:
     needs: build-maven-nfiq
     if: "${{  github.event_name != 'pull_request' }}"
     uses: mosip/kattu/.github/workflows/maven-sonar-analysis.yml@master-java21
     with:
-      SERVICE_LOCATION: ./nfiq1.0
+      SERVICE_LOCATION: ./
       PROJECT_KEY: 'mosip_nfiq'
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

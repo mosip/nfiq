@@ -14,15 +14,37 @@ import org.mosip.nist.nfiq1.common.ILfs.RotGrids;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * LFS (Latent Fingerprint System) Version 2 minutiae detection driver: the core of MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code detect.c} ({@code lfs_detect_minutiae_V2}). It chains together initialization
+ * (lookup tables, rotated grids, padding, 6-bit rescaling), block map generation ({@code Maps}), directional
+ * binarization ({@link Binarization}), minutia detection ({@link MinutiaHelper}), false-minutia removal
+ * ({@link RemoveMinutia}) and neighbour ridge counting ({@link Ridges}). Called by
+ * {@link GetMinutiae#getMinutiae}.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized and the class keeps no mutable state of its
+ * own.
+ */
 public class Detect extends MindTct implements IDetect {
+	/** SLF4J logger for progress, timing and error messages. */
 	private static final Logger logger = LoggerFactory.getLogger(Detect.class);
 
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static Detect instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private Detect() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code Detect} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized Detect getInstance() {
 		if (instance == null) {
 			instance = new Detect();
@@ -30,55 +52,112 @@ public class Detect extends MindTct implements IDetect {
 		return instance;
 	}
 
+	/**
+	 * Returns the LFS initialization helper (padding, DIR2RAD, DFT waves, rotated grids).
+	 *
+	 * @return the {@link Init} singleton
+	 */
 	public Init getInit() {
 		return Init.getInstance();
 	}
 
+	/**
+	 * Returns the MINDTCT global lookup tables (e.g. DFT coefficients).
+	 *
+	 * @return the {@link Globals} singleton
+	 */
 	public Globals getGlobals() {
 		return Globals.getInstance();
 	}
 
+	/**
+	 * Returns the memory-release helper.
+	 *
+	 * @return the {@link Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the MINDTCT image utility helper (padding, bit-depth rescaling, gray/binary conversion).
+	 *
+	 * @return the {@link ImageUtil} singleton (MINDTCT package version)
+	 */
 	public ImageUtil getImageUtil() {
 		return ImageUtil.getInstance();
 	}
 
+	/**
+	 * Returns the directional binarization helper.
+	 *
+	 * @return the {@link Binarization} singleton
+	 */
 	public Binarization getBinarization() {
 		return Binarization.getInstance();
 	}
 
+	/**
+	 * Returns the minutia allocation and detection helper.
+	 *
+	 * @return the {@link MinutiaHelper} singleton
+	 */
 	public MinutiaHelper getMinutiaHelper() {
 		return MinutiaHelper.getInstance();
 	}
 
+	/**
+	 * Returns the false-minutia removal helper.
+	 *
+	 * @return the {@link RemoveMinutia} singleton
+	 */
 	public RemoveMinutia getRemoveMinutia() {
 		return RemoveMinutia.getInstance();
 	}
 
+	/**
+	 * Returns the neighbour ridge counting helper.
+	 *
+	 * @return the {@link Ridges} singleton
+	 */
 	public Ridges getRidges() {
 		return Ridges.getInstance();
 	}
 
-	/*************************************************************************
-	 * #cat: lfsDetectMinutiaeV2 - Takes a grayscale fingerprint image (of #cat:
-	 * arbitrary size), and returns a set of image block maps, #cat: a binarized
-	 * image designating ridges from valleys, #cat: and a list of minutiae
-	 * (including position, reliability, #cat: type, direction, neighbors, and ridge
-	 * counts to neighbors). #cat: The image maps include a ridge flow directional
-	 * map, #cat: a map of low contrast blocks, a map of low ridge flow blocks.
-	 * #cat: and a map of high-curvature blocks. Input: imageData - input 8-bit
-	 * grayscale fingerprint image data imageWidth - width (in pixels) of the image
-	 * imageHeight - height (in pixels) of the image lfsParams - parameters and
-	 * thresholds for controlling LFS Output: ret - Zero - successful completion -
-	 * Negative - system error oMinutiae - resulting list of minutiae map --
-	 * contains above details oBinarizedImageWidth - width (in pixels) of the binary
-	 * image oBinarizedImageHeight - height (in pixels) of the binary image Return
-	 * Code: binarizedImageData - resulting binarized image {0 = black pixel (ridge)
-	 * and 255 = white pixel (valley)}
-	 **************************************************************************/
+	/**
+	 * Detects minutiae in a grayscale fingerprint image of arbitrary size using LFS Version 2 (NIST
+	 * {@code lfs_detect_minutiae_V2}).
+	 * <p>
+	 * Produces a set of image block maps, a binarized image that separates ridges from valleys, and a list of
+	 * minutiae (position, reliability, type, direction, neighbours and ridge counts to neighbours). The maps
+	 * are a ridge-flow direction map, a low-contrast map, a low ridge-flow map and a high-curvature map. Steps:
+	 * <ol>
+	 * <li>Initialization: compute the maximum padding, build the DIR2RAD table, DFT wave forms and DFT rotated
+	 * grids, pad the image (or copy it if no padding is needed) and rescale it to 6 bits [0, 63];</li>
+	 * <li>Maps: generate the block maps into {@code map};</li>
+	 * <li>Binarization: build the directional binarization grids and binarize with
+	 * {@link Binarization#binarizeV2}; the result must have the same size as the input;</li>
+	 * <li>Detection: convert to a 0/1 binary image, allocate the minutia list and detect minutiae;</li>
+	 * <li>Remove false minutiae;</li>
+	 * <li>Count ridges between neighbouring minutiae;</li>
+	 * <li>Wrap-up: convert the binary image back to 0/255 and log timings. The log messages say "secs", but the
+	 * values are milliseconds.</li>
+	 * </ol>
+	 * On failure, the maps in {@code map} may be cleared ({@code null}) and the minutiae released.
+	 *
+	 * @param ret                   output: 0 ({@link ILfs#FALSE}) on success; negative on system error (e.g.
+	 *                              {@link ILfs#ERROR_CODE_581} if the binary image has the wrong dimensions)
+	 * @param oMinutiae             output: receives the resulting list of minutiae
+	 * @param map                   input/output: receives the direction, low-contrast, low-flow and high-curve
+	 *                              block maps and their dimensions
+	 * @param oBinarizedImageWidth  output: width (in pixels) of the binary image
+	 * @param oBinarizedImageHeight output: height (in pixels) of the binary image
+	 * @param imageData             input 8-bit grayscale fingerprint image data, row-major
+	 * @param imageWidth            width (in pixels) of the image
+	 * @param imageHeight           height (in pixels) of the image
+	 * @param lfsParams             parameters and thresholds that control LFS
+	 * @return the binarized image (0 = black pixel (ridge), 255 = white pixel (valley)), or {@code null} on error
+	 */
 	@SuppressWarnings({ "java:S3776" })
 	public int[] lfsDetectMinutiaeV2(AtomicInteger ret, AtomicReference<Minutiae> oMinutiae, Maps map,
 			AtomicInteger oBinarizedImageWidth, AtomicInteger oBinarizedImageHeight, int[] imageData,
@@ -182,7 +261,7 @@ public class Detect extends MindTct implements IDetect {
 		long mapStartTime = System.currentTimeMillis();
 
 		if (isShowLogs())
-			logger.info("INITIALIZATION AND PADDING DONE");
+			logger.debug("INITIALIZATION AND PADDING DONE");
 
 		/******************/
 		/* MAPS */
@@ -204,14 +283,14 @@ public class Detect extends MindTct implements IDetect {
 		getFree().freeRotGrids(dftGrids);
 
 		if (isShowLogs())
-			logger.info("MAPS DONE");
+			logger.debug("MAPS DONE");
 		long mapEndTime = System.currentTimeMillis();
 
 		/******************/
 		/* BINARIZARION */
 		/******************/
 		if (isShowLogs())
-			logger.info("BINARIZATION STARTED");
+			logger.debug("BINARIZATION STARTED");
 		long binStartTime = System.currentTimeMillis();
 
 		/* Initialize lookup table for pixel offsets to rotated grids */
@@ -257,7 +336,7 @@ public class Detect extends MindTct implements IDetect {
 			map.setLowContrastMap(null);
 			map.setLowFlowMap(null);
 			map.setHighCurveMap(null);
-			logger.info(
+			logger.debug(
 					"ERROR : lfsDetectMinutiaeV2 : binary image has bad dimensions : binarizedImageWidth = {}, binarizedImageHeight = {}",
 					binarizedImageWidth, binarizedImageHeight);
 			ret.set(ILfs.ERROR_CODE_581);
@@ -266,14 +345,14 @@ public class Detect extends MindTct implements IDetect {
 		}
 
 		if (isShowLogs())
-			logger.info("BINARIZATION DONE");
+			logger.debug("BINARIZATION DONE");
 		long binEndTime = System.currentTimeMillis();
 
 		/******************/
 		/* DETECTION */
 		/******************/
 		if (isShowLogs())
-			logger.info("MINUTIA DETECTION STARTED");
+			logger.debug("MINUTIA DETECTION STARTED");
 		long minStartTime = System.currentTimeMillis();
 
 		/* Convert 8-bit grayscale binary image [0,255] to */
@@ -322,7 +401,7 @@ public class Detect extends MindTct implements IDetect {
 		}
 
 		if (isShowLogs())
-			logger.info("MINUTIA DETECTION DONE");
+			logger.debug("MINUTIA DETECTION DONE");
 		long rmEndTime = System.currentTimeMillis();
 
 		/******************/
@@ -342,7 +421,7 @@ public class Detect extends MindTct implements IDetect {
 		}
 
 		if (isShowLogs())
-			logger.info("NEIGHBOR RIDGE COUNT DONE");
+			logger.debug("NEIGHBOR RIDGE COUNT DONE");
 		long ridgeEndTime = System.currentTimeMillis();
 
 		/******************/
@@ -363,17 +442,17 @@ public class Detect extends MindTct implements IDetect {
 		/******************/
 		/* These Timings will print when TIMER is defined. */
 		/* print MAP generation timing statistics */
-		logger.info("TIMER: MAPS time   =  {} (secs)", (float) (mapEndTime - mapStartTime));
+		logger.debug("TIMER: MAPS time   =  {} (ms)", (float) (mapEndTime - mapStartTime));
 		/* print binarization timing statistics */
-		logger.info("TIMER: Binarization time   =  {} (secs)", (float) (binEndTime - binStartTime));
+		logger.debug("TIMER: Binarization time   =  {} (ms)", (float) (binEndTime - binStartTime));
 		/* print minutia detection timing statistics */
-		logger.info("TIMER: Minutia Detection time   =  {} (secs)", (float) (minEndTime - minStartTime));
+		logger.debug("TIMER: Minutia Detection time   =  {} (ms)", (float) (minEndTime - minStartTime));
 		/* print minutia removal timing statistics */
-		logger.info("TIMER: Minutia Removal time   =  {} (secs)", (float) (rmEndTime - rmStartTime));
+		logger.debug("TIMER: Minutia Removal time   =  {} (ms)", (float) (rmEndTime - rmStartTime));
 		/* print neighbor ridge count timing statistics */
-		logger.info("TIMER: Neighbor Ridge Counting time   =  {} (secs)", (float) (ridgeEndTime - ridgeStartTime));
+		logger.debug("TIMER: Neighbor Ridge Counting time   =  {} (ms)", (float) (ridgeEndTime - ridgeStartTime));
 		/* print total timing statistics */
-		logger.info("TIMER: Total time   = {} (secs)", (float) (totalEndTime - totalStartTime));
+		logger.debug("TIMER: Total time   = {} (ms)", (float) (totalEndTime - totalStartTime));
 		ret.set(ILfs.FALSE);
 
 		return binarizedImageData;

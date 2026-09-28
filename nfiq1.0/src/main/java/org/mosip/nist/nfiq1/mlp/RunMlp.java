@@ -10,14 +10,38 @@ import org.mosip.nist.nfiq1.mindtct.Free;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Runs the NFIQ two-layer multi-layer perceptron (MLP) on a feature vector to produce the quality class and
+ * confidence.
+ * <p>
+ * Port of NIST's {@code mlp/runmlp.c} ({@code runmlp} and {@code runmlp2}). The network has one hidden layer.
+ * {@code weights} is laid out as in NIST's MLP weight files: first-layer weights (nHids x nInps), first-layer
+ * biases (nHids), second-layer weights (nOuts x nHids), then second-layer biases (nOuts). Each layer is
+ * computed with {@link MlpCla#mlpSgemV} (transposed form) followed by the chosen activation function from
+ * {@link Acs}. The winning output node gives the hypothetical class (the NFIQ level minus 1) and its activation
+ * gives the confidence.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized. Not fully thread-safe, because it
+ * delegates to {@link MlpCla}, which keeps scratch state in static fields.
+ */
 public class RunMlp extends Mlp implements IRunMlp {
+	/** SLF4J logger for configuration errors (unsupported activation codes, too many hidden nodes). */
 	private static final Logger logger = LoggerFactory.getLogger(RunMlp.class);
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static RunMlp instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private RunMlp() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code RunMlp} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized RunMlp getInstance() {
 		if (instance == null) {
 			instance = new RunMlp();
@@ -25,157 +49,96 @@ public class RunMlp extends Mlp implements IRunMlp {
 		return instance;
 	}
 
+	/**
+	 * Returns the activation-function helper.
+	 *
+	 * @return the {@link Acs} singleton
+	 */
 	public Acs getAcs() {
 		return Acs.getInstance();
 	}
 
+	/**
+	 * Returns the memory-release helper (kept for parity with the NIST C code).
+	 *
+	 * @return the {@link Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the BLAS-style linear algebra helper.
+	 *
+	 * @return the {@link MlpCla} singleton
+	 */
 	public MlpCla getMlpCla() {
 		return MlpCla.getInstance();
 	}
 
-	/*************************************************************/
-	/*
-	 * runmlp: Runs the Multi-Layer Perceptron (MLP) on a feature vector. Input
-	 * args: nInps, nHids, nOuts: Numbers of input, hidden, and output nodes of the
-	 * MLP. acFuncHidsCode: Code character specifying the type of activation
-	 * function to be used on the hidden nodes: must be LINEAR, SIGMOID, or SINUSOID
-	 * (defined in parms.h). acFuncOutsCode: Code character specifying the type of
-	 * activation function to be used on the output nodes. weights: The MLP weights.
-	 * featvec: The feature vector that the MLP is to be run on; its first nInps
-	 * elts will be used. Output args: outAcs: The output activations. This buffer
-	 * must be provided by caller, allocated to (at least) nOuts floats. hypClass:
-	 * The hypothetical class, as an integer in the range 0 through nOuts - 1.
-	 * confidence: A floating-point value in the range 0. through 1. Defined to be
-	 * outAcs[hypClass], i.e. the highest output-activation value.
+	/**
+	 * Runs the multi-layer perceptron on a feature vector (NIST {@code runmlp}).
+	 * <p>
+	 * Hidden activations start as the first-layer biases, have the first-layer weights times the feature
+	 * vector added, and are then passed through the hidden activation function. The output layer is computed
+	 * the same way from the hidden activations. The output node that activates most strongly is the
+	 * hypothetical class, and its activation is the confidence.
+	 * <p>
+	 * The computation is identical to {@link #runMlp2}. Where the C original aborts the process on an error,
+	 * this method throws {@link IllegalArgumentException} instead.
+	 *
+	 * @param nInps            number of input nodes; the first {@code nInps} elements of the feature vector are used
+	 * @param nHids            number of hidden nodes; must not exceed {@code IMlp.MAX_NHIDS}
+	 * @param nOuts            number of output nodes (classes)
+	 * @param acFuncHidsCode   activation function for the hidden nodes: {@code IMlp.LINEAR}, {@code IMlp.SIGMOID}
+	 *                         or {@code IMlp.SINUSOID} (defined in NIST {@code parms.h})
+	 * @param acFuncOutsCode   activation function for the output nodes (same codes)
+	 * @param weights          the MLP weights and biases, laid out as described in the class documentation
+	 * @param featureVectorArr the feature vector to classify
+	 * @param outAcs           output: the output activations; must be allocated by the caller with at least
+	 *                         {@code nOuts} elements
+	 * @param hypClass         output: the hypothetical class, an integer from 0 to {@code nOuts - 1}
+	 * @param confidence       output: a value from 0 to 1, defined as {@code outAcs[hypClass]} (the highest
+	 *                         output activation)
+	 * @throws IllegalArgumentException if {@code nHids} exceeds {@code IMlp.MAX_NHIDS} or an activation code is
+	 *                                  not supported
 	 */
 	public void runMlp(final int nInps, final int nHids, final int nOuts, final int acFuncHidsCode,
 			final int acFuncOutsCode, AtomicReferenceArray<Double> weights, double[] featureVectorArr,
 			AtomicReferenceArray<Double> outAcs, AtomicInteger hypClass, AtomicReference<Double> confidence) {
-
-		AtomicReference<Character> runmlp1t = new AtomicReference<>();
-		runmlp1t.set('t');
-
-		AtomicInteger runmlp1i1 = new AtomicInteger();
-		runmlp1i1.set(1);
-
-		AtomicReference<Double> runmlp1f1 = new AtomicReference<Double>();
-		runmlp1f1.set(1.0d);
-
-		AtomicReferenceArray<Double> w1, b1, w2, b2;
-		AtomicReferenceArray<Double> hidacs = new AtomicReferenceArray<>(IMlp.MAX_NHIDS);
-		double pvalue;
-		double pevalue;
-		double maxacp;
-		double maxac, ac;
-
-		if (nHids > IMlp.MAX_NHIDS) {
-			logger.error("ERROR : runmlp nHids, {}, is > MAX_NHIDS, defined as {} in runmlp ", nHids, IMlp.MAX_NHIDS);
-			System.exit(-1);
+		int ret = runMlp2(nInps, nHids, nOuts, acFuncHidsCode, acFuncOutsCode, weights, featureVectorArr, outAcs,
+				hypClass, confidence);
+		if (ret != 0) {
+			throw new IllegalArgumentException("runmlp failed with code " + ret);
 		}
-
-		/* Where the weights and biases of the two layers begin in weights. */
-		w1 = weights;
-		b1 = new AtomicReferenceArray<>(w1.length() + nHids * nInps);
-		w2 = new AtomicReferenceArray<>(b1.length() + nHids);
-		b2 = new AtomicReferenceArray<>(w2.length() + nOuts * nHids);
-
-		int index = 0;
-		/* Start hidden activations out as first-layer biases. */
-		for (index = 0; index < nHids; index++)
-			hidacs.set(index, b1.get(index));
-
-		AtomicReferenceArray<Double> featvec = new AtomicReferenceArray<>(featureVectorArr.length);
-		for (index = 0; index < featureVectorArr.length; index++) {
-			featvec.set(index, featureVectorArr[index]);
-		}
-
-		/* Add product of first-layer weights with feature vector. */
-		getMlpCla().mlpSgemV(runmlp1t, nInps, nHids, runmlp1f1, w1, nInps, featvec, runmlp1i1, runmlp1f1, hidacs,
-				runmlp1i1);
-
-		/* Finish each hidden activation by applying activation function. */
-		index = 0;
-		for (pevalue = (pvalue = hidacs.get(index)) + nHids; pvalue < pevalue; index++) {
-			/* Resolve the activation function codes to functions. */
-			switch (acFuncHidsCode) {
-			case IMlp.LINEAR:
-				getAcs().acVLinear(hidacs, index);
-				break;
-			case IMlp.SIGMOID:
-				getAcs().acVSigmoid(hidacs, index);
-				break;
-			case IMlp.SINUSOID:
-				getAcs().acVSinusoid(hidacs, index);
-				break;
-			default:
-				logger.info(
-						"runmlp :: unsupported acFuncHidsCode {}. nSupported codes are LINEAR ({}), SIGMOID ({}), and SINUSOID ({}).",
-						(int) acFuncHidsCode, (int) IMlp.LINEAR, (int) IMlp.SIGMOID, (int) IMlp.SINUSOID);
-				break;
-			}
-		}
-
-		/* Same steps again for second layer. */
-		for (index = 0; index < nOuts; index++)
-			outAcs.set(index, b2.get(index));
-
-		getMlpCla().mlpSgemV(runmlp1t, nHids, nOuts, runmlp1f1, w2, nHids, hidacs, runmlp1i1, runmlp1f1, outAcs,
-				runmlp1i1);
-		index = 0;
-		for (pevalue = (pvalue = outAcs.get(index)) + nOuts; pvalue < pevalue; index++) {
-			switch (acFuncOutsCode) {
-			case IMlp.LINEAR:
-				getAcs().acVLinear(outAcs, index);
-				break;
-			case IMlp.SIGMOID:
-				getAcs().acVSigmoid(outAcs, index);
-				break;
-			case IMlp.SINUSOID:
-				getAcs().acVSinusoid(outAcs, index);
-				break;
-			default:
-				logger.info(
-						"runmlp:: unsupported acFuncOutsCode {}. Supported codes are LINEAR ({}), SIGMOID ({}), and SINUSOID ({}).",
-						(int) acFuncOutsCode, (int) IMlp.LINEAR, (int) IMlp.SIGMOID, (int) IMlp.SINUSOID);
-				break;
-			}
-		}
-
-		/*
-		 * Find the hypothetical class -- the class whose output node activated most
-		 * strongly -- and the confidence -- that activation value.
-		 */
-		index = 0;
-		for (pevalue = (maxacp = pvalue = outAcs.get(index))
-				+ nOuts, maxac = pvalue, index++; pvalue < pevalue; index++) {
-			if ((ac = pvalue) > maxac) {
-				maxac = ac;
-				maxacp = pvalue;
-			}
-		}
-
-		hypClass.set((int) ((int) maxacp - outAcs.get(0)));
-		confidence.set(maxac);
 	}
 
-	/*************************************************************/
-	/*
-	 * runmlp2: Runs the Multi-Layer Perceptron (MLP) on a feature vector. Input
-	 * args: nInps, nHids, nOuts: Numbers of input, hidden, and output nodes of the
-	 * MLP. acFuncHidsCode: Code character specifying the type of activation
-	 * function to be used on the hidden nodes: must be LINEAR, SIGMOID, or SINUSOID
-	 * (defined in parms.h). acFuncOutsCode: Code character specifying the type of
-	 * activation function to be used on the output nodes. weights: The MLP weights.
-	 * featvec: The feature vector that the MLP is to be run on; its first nInps
-	 * elts will be used. Output args: outAcs: The output activations. This buffer
-	 * must be provided by caller, allocated to (at least) nOuts floats. hypClass:
-	 * The hypothetical class, as an integer in the range 0 through nOuts - 1.
-	 * confidence: A floating-point value in the range 0. through 1. Defined to be
-	 * outAcs[hypClass], i.e. the highest output-activation value.
+	/**
+	 * Runs the multi-layer perceptron on a feature vector, returning an error code instead of exiting (NIST
+	 * {@code runmlp2}).
+	 * <p>
+	 * This is the variant NFIQ uses. Offsets {@code w1}, {@code b1}, {@code w2} and {@code b2} are computed
+	 * into {@code weights}. Hidden activations start as the first-layer biases, have the first-layer weights
+	 * times the feature vector added, and are then passed through the hidden activation function. The output
+	 * layer is computed the same way from the hidden activations. The output node that activates most strongly
+	 * is the hypothetical class, and its activation is the confidence. The feature vector values are copied
+	 * back into {@code featureVectorArr} after the first layer; they are not changed.
+	 *
+	 * @param nInps            number of input nodes; the first {@code nInps} elements of the feature vector are used
+	 * @param nHids            number of hidden nodes; must not exceed {@code IMlp.MAX_NHIDS}
+	 * @param nOuts            number of output nodes (classes)
+	 * @param acFuncHidsCode   activation function for the hidden nodes: {@code IMlp.LINEAR}, {@code IMlp.SIGMOID}
+	 *                         or {@code IMlp.SINUSOID} (defined in NIST {@code parms.h})
+	 * @param acFuncOutsCode   activation function for the output nodes (same codes)
+	 * @param weights          the MLP weights and biases, laid out as described in the class documentation
+	 * @param featureVectorArr the feature vector to classify
+	 * @param outAcs           output: the output activations; must be allocated by the caller with at least
+	 *                         {@code nOuts} elements
+	 * @param hypClass         output: the hypothetical class, an integer from 0 to {@code nOuts - 1}
+	 * @param confidence       output: a value from 0 to 1, defined as {@code outAcs[hypClass]} (the highest
+	 *                         output activation)
+	 * @return 0 on success; -2 if {@code nHids > IMlp.MAX_NHIDS}; -3 if {@code acFuncHidsCode} is unsupported;
+	 *         -4 if {@code acFuncOutsCode} is unsupported
 	 */
 	public int runMlp2(final int nInps, final int nHids, final int nOuts, final int acFuncHidsCode,
 			final int acFuncOutsCode, AtomicReferenceArray<Double> weights, double[] featureVectorArr,
@@ -304,11 +267,11 @@ public class RunMlp extends Mlp implements IRunMlp {
 		for (maxac = outAcs.get(pIndex), pIndex++; pIndex < peIndex; pIndex++) {
 			if ((ac = outAcs.get(pIndex)) > maxac) {
 				maxac = ac;
-				maxacpIndex++;
+				maxacpIndex = pIndex;
 			}
 		}
 
-		hypClass.set((maxacpIndex - 0));
+		hypClass.set(maxacpIndex);
 		confidence.set(maxac);
 
 		return 0;

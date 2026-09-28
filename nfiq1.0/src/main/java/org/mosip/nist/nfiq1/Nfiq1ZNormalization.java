@@ -7,22 +7,27 @@ import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.INfiq.INfiq1ZNormalization;
 import org.mosip.nist.nfiq1.util.SsxStats;
 
+/**
+ * Z-normalization routines for NFIQ feature vectors (port of NIST's {@code znorm.c}).
+ * <p>
+ * Z-normalization rescales each feature to zero mean and unit variance using global statistics, so that the
+ * MLP classifier sees features on comparable scales. Instances hold only a stateless {@link SsxStats} helper.
+ */
 public class Nfiq1ZNormalization implements INfiq1ZNormalization
 {
+	/** Helper for computing standard deviation from running sums. */
 	private SsxStats ssxStats = new SsxStats();
 	
-	/***********************************************************************
-	************************************************************************
-	#cat: ZNormalizeFeatureVector - Routine Z-Normalized an NFIQ feature vector
-
-	   Input:
-	      featureVector    - NFIQ feature vector
-	      zNormmeansList - global meansList for each coef in the feature vector
-	      zNormStds  - global stddev for each coef in the feature vector
-	      vectorLength     - allocated length of feature vector
-	   Output:
-	      featureVector    - resulting normalized feature vector values
-	************************************************************************/
+	/**
+	 * Z-normalizes an NFIQ feature vector in place (NIST {@code znorm_fniq_featvctr}).
+	 * <p>
+	 * For each coefficient {@code i}: {@code featureVector[i] = (featureVector[i] - mean[i]) / stddev[i]}.
+	 *
+	 * @param featureVector  NFIQ feature vector; overwritten with the normalized values
+	 * @param zNormmeansList global mean for each coefficient of the feature vector
+	 * @param zNormStds      global standard deviation for each coefficient of the feature vector
+	 * @param vectorLength   number of coefficients to normalize
+	 */
 	public void ZNormalizeFeatureVector(double[] featureVector, double[] zNormmeansList, double[] zNormStds, final int vectorLength)
 	{
 		int i;
@@ -32,23 +37,21 @@ public class Nfiq1ZNormalization implements INfiq1ZNormalization
 		}
 	}
 
-	/***********************************************************************
-	************************************************************************
-	#cat: computeZNormStats - Routine takes a list of feature vectors
-	#cat:             (a matrix) and computes the mean and stddev for each
-	#cat:             column of features coefs in the matrix.
-
-	   Input:
-	      featureList       - list of input feature vectors
-	      nfeatureVectors  	- number of vectors in the list
-	      noOffeatureList 	- number of coefs in each vector
-	   Output:
-	      oMeansList      	- resulting allocated list of coef meansList
-	      oStdDevsList    	- resulting allocated list of coef stdDevsList
-	   Return Code:
-	      Zero        		- successful completion
-	      Negative    		- system error
-	************************************************************************/
+	/**
+	 * Computes the per-column mean and standard deviation of a matrix of feature vectors (NIST
+	 * {@code comp_znorm_stats}).
+	 * <p>
+	 * {@code featureList} is indexed as {@code featureList.get(featureIndex).get(vectorIndex)}. Side effect: each
+	 * visited entry of {@code featureList} is incremented by {@code noOffeatureList} while summing.
+	 *
+	 * @param oMeansList      output; element 0 is set to the list of coefficient means
+	 * @param oStdDevsList    output; element 0 is set to the list of coefficient standard deviations
+	 * @param featureList     input feature matrix, one inner list per feature coefficient
+	 * @param nfeatureVectors number of feature vectors (entries per inner list)
+	 * @param noOffeatureList number of coefficients in each feature vector
+	 * @return {@code 0} ({@code ILfs.FALSE}) on successful completion, or {@code -4} if a standard deviation could
+	 *         not be computed (system error)
+	 */
 	public int computeZNormStats(List<List<Double>> oMeansList, List<List<Double>> oStdDevsList, 
 			List<List<Double>> featureList, final int nfeatureVectors, final int noOffeatureList) {
 	   double fret;
@@ -77,7 +80,6 @@ public class Nfiq1ZNormalization implements INfiq1ZNormalization
 		   {
 			   sumX += featptr.get(vectorIndex);
 			   sumX2 += featptr.get(vectorIndex) * featptr.get(vectorIndex);
-			   featptr.set(vectorIndex, featptr.get(vectorIndex) + noOffeatureList);
 		   }
 		   /* compute mean of column features */
 		   mptr.add((double) (sumX / nfeatureVectors));
@@ -100,10 +102,20 @@ public class Nfiq1ZNormalization implements INfiq1ZNormalization
 	   return ILfs.FALSE;
 	}		
 
+	/**
+	 * Returns the helper used to compute standard deviations.
+	 *
+	 * @return the {@link SsxStats} helper
+	 */
 	public SsxStats getSsxStats() {
 		return ssxStats;
 	}
 
+	/**
+	 * Sets the helper used to compute standard deviations.
+	 *
+	 * @param ssxStats the {@link SsxStats} helper
+	 */
 	public void setSsxStats(SsxStats ssxStats) {
 		this.ssxStats = ssxStats;
 	}

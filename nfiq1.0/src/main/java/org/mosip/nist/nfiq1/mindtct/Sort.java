@@ -6,13 +6,33 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.mosip.nist.nfiq1.common.ILfs;
 import org.mosip.nist.nfiq1.common.ILfs.ISort;
 
+/**
+ * Simple sorting utilities used throughout MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code sort.c}. Provides in-place bubble sorts of integer
+ * and double rank lists, optionally moving a parallel list of integer items
+ * (typically indices) along with the ranks. Bubble sort is adequate because
+ * the lists sorted by MINDTCT are small.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class Sort extends MindTct implements ISort {
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Sort instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Sort() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Sort} instance
+	 */
 	public static synchronized Sort getInstance() {
 		if (instance == null) {
 			synchronized (Sort.class) {
@@ -24,16 +44,21 @@ public class Sort extends MindTct implements ISort {
 		return instance;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortIndicesIntArrayIncremental - Takes a list of integers and returns a
-	 * list of #cat: indices referencing the integer list in increasing order. #cat:
-	 * The original list of integers is also returned in sorted #cat: order. Input:
-	 * ranks - list of integers to be sorted num - number of integers in the list
-	 * Output: order - list of indices referencing the integer list in sorted order
-	 * ranks - list of integers in increasing order Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a list of integers and returns a list of indices referencing the
+	 * integer list in increasing order. The original list of integers is also
+	 * returned in sorted order.
+	 * <p>
+	 * NIST: {@code sort_indices_int_inc()}.
+	 *
+	 * @param order output: list of indices referencing the integer list in sorted
+	 *              order (must hold at least {@code num} entries)
+	 * @param ranks input/output: list of integers to be sorted; on return sorted
+	 *              in increasing order
+	 * @param num   number of integers in the list
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int sortIndicesIntArrayIncremental(AtomicIntegerArray order, AtomicIntegerArray ranks, final int num) {
 		int i;
 
@@ -50,16 +75,21 @@ public class Sort extends MindTct implements ISort {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortIndicesDoubleArrayIncremental - Takes a list of doubles and returns
-	 * a list of #cat: indices referencing the double list in increasing order.
-	 * #cat: The original list of doubles is also returned in sorted #cat: order.
-	 * Input: ranks - list of doubles to be sorted num - number of doubles in the
-	 * list Output: optr - list of indices referencing the double list in sorted
-	 * order ranks - list of doubles in increasing order Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a list of doubles and returns a list of indices referencing the
+	 * double list in increasing order. The original list of doubles is also
+	 * returned in sorted order.
+	 * <p>
+	 * NIST: {@code sort_indices_double_inc()}.
+	 *
+	 * @param order output: list of indices referencing the double list in sorted
+	 *              order (must hold at least {@code num} entries)
+	 * @param ranks input/output: list of doubles to be sorted; on return sorted
+	 *              in increasing order
+	 * @param num   number of doubles in the list
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int sortIndicesDoubleArrayIncremental(AtomicIntegerArray order, AtomicReferenceArray<Double> ranks,
 			final int num) {
 		int i;
@@ -77,16 +107,19 @@ public class Sort extends MindTct implements ISort {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: bubbleSortIntArrayIncremental2 - Takes a list of integer ranks and a
-	 * corresponding #cat: list of integer attributes, and sorts the ranks #cat:
-	 * into increasing order moving the attributes #cat: correspondingly. Input:
-	 * ranks - list of integers to be sort on items - list of corresponding integer
-	 * attributes len - number of items in list Output: ranks - list of integers
-	 * sorted in increasing order items - list of attributes in corresponding sorted
-	 * order
-	 **************************************************************************/
+	/**
+	 * Takes a list of integer ranks and a corresponding list of integer
+	 * attributes, and sorts the ranks into increasing order moving the attributes
+	 * correspondingly.
+	 * <p>
+	 * NIST: {@code bubble_sort_int_inc_2()}.
+	 *
+	 * @param ranks input/output: list of integers to sort on; on return sorted in
+	 *              increasing order
+	 * @param items input/output: list of corresponding integer attributes; on
+	 *              return in the corresponding sorted order
+	 * @param len   number of items in list
+	 */
 	public void bubbleSortIntArrayIncremental2(AtomicIntegerArray ranks, AtomicIntegerArray items, final int len) {
 		int done = 0;
 		int i;
@@ -127,16 +160,19 @@ public class Sort extends MindTct implements ISort {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: bubbleSortDoubleArrayIncremental2 - Takes a list of double ranks and a
-	 * #cat: corresponding list of integer attributes, and sorts the #cat: ranks
-	 * into increasing order moving the attributes #cat: correspondingly. Input:
-	 * ranks - list of double to be sort on items - list of corresponding integer
-	 * attributes len - number of items in list Output: ranks - list of doubles
-	 * sorted in increasing order items - list of attributes in corresponding sorted
-	 * order
-	 **************************************************************************/
+	/**
+	 * Takes a list of double ranks and a corresponding list of integer
+	 * attributes, and sorts the ranks into increasing order moving the attributes
+	 * correspondingly.
+	 * <p>
+	 * NIST: {@code bubble_sort_double_inc_2()}.
+	 *
+	 * @param ranks input/output: list of doubles to sort on; on return sorted in
+	 *              increasing order
+	 * @param items input/output: list of corresponding integer attributes; on
+	 *              return in the corresponding sorted order
+	 * @param len   number of items in list
+	 */
 	public void bubbleSortDoubleArrayIncremental2(AtomicReferenceArray<Double> ranks, AtomicIntegerArray items,
 			final int len) {
 		int done = 0;
@@ -179,17 +215,21 @@ public class Sort extends MindTct implements ISort {
 		}
 	}
 
-	/***************************************************************************
-	 **************************************************************************
-	 * #cat: bubbleSortDoubleArrayDecremental2 - Conducts a simple bubble sort
-	 * returning a list #cat: of ranks in decreasing order and their associated
-	 * items in sorted #cat: order as well. Input: ranks - list of values to be
-	 * sorted items - list of items, each corresponding to a particular rank value
-	 * len - length of the lists to be sorted Output: ranks - list of values sorted
-	 * in descending order items - list of items in the corresponding sorted order
-	 * of the ranks. If these items are indices, upon return, they may be used as
-	 * indirect addresses reflecting the sorted order of the ranks.
-	 ****************************************************************************/
+	/**
+	 * Conducts a simple bubble sort returning a list of ranks in decreasing order
+	 * and their associated items in sorted order as well.
+	 * <p>
+	 * NIST: {@code bubble_sort_double_dec_2()}.
+	 *
+	 * @param ranks input/output: list of values to be sorted; on return sorted in
+	 *              descending order
+	 * @param items input/output: list of items, each corresponding to a
+	 *              particular rank value; on return in the corresponding sorted
+	 *              order of the ranks. If these items are indices, upon return
+	 *              they may be used as indirect addresses reflecting the sorted
+	 *              order of the ranks.
+	 * @param len   length of the lists to be sorted
+	 */
 	public void bubbleSortDoubleArrayDecremental2(AtomicReferenceArray<Double> ranks, AtomicIntegerArray items,
 			final int len) {
 		int done = ILfs.FALSE;
@@ -220,13 +260,16 @@ public class Sort extends MindTct implements ISort {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: bubbleSortIntArrayIncremental - Takes a list of integers and sorts them
-	 * into #cat: increasing order using a simple bubble sort. Input: ranks - list
-	 * of integers to be sort on len - number of items in list Output: ranks - list
-	 * of integers sorted in increasing order
-	 **************************************************************************/
+	/**
+	 * Takes a list of integers and sorts them into increasing order using a
+	 * simple bubble sort.
+	 * <p>
+	 * NIST: {@code bubble_sort_int_inc()}.
+	 *
+	 * @param ranks input/output: list of integers to sort; on return sorted in
+	 *              increasing order
+	 * @param len   number of items in list
+	 */
 	public void bubbleSortIntArrayIncremental(AtomicIntegerArray ranks, final int len) {
 		int done = 0;
 		int i;

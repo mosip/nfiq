@@ -10,14 +10,35 @@ import org.mosip.nist.nfiq1.common.ILfs.ILfsUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Miscellaneous numeric, list and geometry utilities used across MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code util.c}. Provides min/max search, detection of
+ * relative minima/maxima, Euclidean and squared distances, list search,
+ * removal and sorted-insertion helpers, angle/direction computations between
+ * points, and the closest distance between two IMAP directions.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class LfsUtil extends MindTct implements ILfsUtil {
+	/** SLF4J logger for error reporting in this class. */
 	private static final Logger logger = LoggerFactory.getLogger(LfsUtil.class);
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static LfsUtil instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private LfsUtil() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code LfsUtil} instance
+	 */
 	public static synchronized LfsUtil getInstance() {
 		if (instance == null) {
 			synchronized (LfsUtil.class) {
@@ -29,17 +50,25 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Defs} helper (rounding, modulo and precision
+	 * truncation).
+	 *
+	 * @return the {@code Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: maxValue - Determines the maximum value in the given list of integers.
-	 * #cat: NOTE, the list is assumed to be NOT empty! Input: list - non-empty list
-	 * of integers to be searched num - number of integers in the list Return Code:
-	 * Maximum - maximum value in the list
-	 **************************************************************************/
+	/**
+	 * Determines the maximum value in the given list of integers.
+	 * <p>
+	 * NIST: {@code maxv()}. NOTE: the list is assumed to be NOT empty.
+	 *
+	 * @param list non-empty list of integers to be searched
+	 * @param num  number of integers in the list
+	 * @return the maximum value in the list
+	 */
 	public int maxValue(final AtomicIntegerArray list, final int num) {
 		int i;
 		int maxval;
@@ -62,13 +91,15 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (maxval);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: minValue - Determines the minimum value in the given list of integers.
-	 * #cat: NOTE, the list is assumed to be NOT empty! Input: list - non-empty list
-	 * of integers to be searched num - number of integers in the list Return Code:
-	 * Minimum - minimum value in the list
-	 **************************************************************************/
+	/**
+	 * Determines the minimum value in the given list of integers.
+	 * <p>
+	 * NIST: {@code minv()}. NOTE: the list is assumed to be NOT empty.
+	 *
+	 * @param list non-empty list of integers to be searched
+	 * @param num  number of integers in the list
+	 * @return the minimum value in the list
+	 */
 	public int minValue(final AtomicIntegerArray list, final int num) {
 		int i;
 		int minval;
@@ -91,18 +122,28 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (minval);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: minMaxs - Takes a list of integers and identifies points of relative
-	 * #cat: minima and maxima. The midpoint of flat plateaus and valleys #cat: are
-	 * selected when they are detected. Input: items - list of integers to be
-	 * analyzed num - number of items in the list Output: oMinMaxValue - value of
-	 * the item at each minima or maxima oMinMaxType - identifies a minima as '-1'
-	 * and maxima as '1' oMinMaxIndex - index of item's position in list
-	 * oMinMaxAlloc - number of allocated minima and/or maxima oMinMaxNumber -
-	 * number of detected minima and/or maxima Return Code: Zero - successful
-	 * completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a list of integers and identifies points of relative minima and
+	 * maxima.
+	 * <p>
+	 * NIST: {@code minmaxs()}. The midpoint of flat plateaus and valleys is
+	 * selected when they are detected. The output arrays must be pre-allocated
+	 * by the caller with at least {@code num - 2} entries (every intermediate
+	 * point can potentially be a min or max). If fewer than 3 items are given,
+	 * no min/max is possible and both {@code oMinMaxAlloc} and
+	 * {@code oMinMaxNumber} are set to -1.
+	 *
+	 * @param oMinMaxValue  output: value of the item at each minimum or maximum
+	 * @param oMinMaxType   output: identifies a minimum as -1 and a maximum as 1
+	 * @param oMinMaxIndex  output: index of each extremum's position in the list
+	 * @param oMinMaxAlloc  output: number of allocated minima and/or maxima
+	 *                      ({@code num - 2})
+	 * @param oMinMaxNumber output: number of detected minima and/or maxima
+	 * @param items         list of integers to be analyzed
+	 * @param num           number of items in the list
+	 * @return zero ({@link ILfs#FALSE}) on successful completion (negative would
+	 *         indicate a system error)
+	 */
 	public int minMaxs(AtomicIntegerArray oMinMaxValue, AtomicIntegerArray oMinMaxType, AtomicIntegerArray oMinMaxIndex,
 			AtomicInteger oMinMaxAlloc, AtomicInteger oMinMaxNumber, AtomicIntegerArray items, final int num) {
 		int i;
@@ -272,13 +313,18 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: distance - Takes two coordinate points and computes the #cat: Euclidean
-	 * distance between the two points. Input: x1 - x-coord of first point y1 -
-	 * y-coord of first point x2 - x-coord of second point y2 - y-coord of second
-	 * point Return Code: Distance - computed Euclidean distance
-	 **************************************************************************/
+	/**
+	 * Takes two coordinate points and computes the Euclidean distance between
+	 * them.
+	 * <p>
+	 * NIST: {@code distance()}.
+	 *
+	 * @param x1 x-coord of first point
+	 * @param y1 y-coord of first point
+	 * @param x2 x-coord of second point
+	 * @param y2 y-coord of second point
+	 * @return the computed Euclidean distance (in pixels)
+	 */
 	public double distance(final int x1, final int y1, final int x2, final int y2) {
 		double dx;
 		double dy;
@@ -297,13 +343,18 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (dist);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: squaredDistance - Takes two coordinate points and computes the #cat:
-	 * squared distance between the two points. Input: x1 - x-coord of first point
-	 * y1 - y-coord of first point x2 - x-coord of second point y2 - y-coord of
-	 * second point Return Code: Distance - computed squared distance
-	 **************************************************************************/
+	/**
+	 * Takes two coordinate points and computes the squared distance between
+	 * them.
+	 * <p>
+	 * NIST: {@code squared_distance()}.
+	 *
+	 * @param x1 x-coord of first point
+	 * @param y1 y-coord of first point
+	 * @param x2 x-coord of second point
+	 * @param y2 y-coord of second point
+	 * @return the computed squared distance (in pixels squared)
+	 */
 	public double squaredDistance(final int x1, final int y1, final int x2, final int y2) {
 		double dx;
 		double dy;
@@ -320,15 +371,19 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (dist);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: getValueLocationInList - Determines if a specified value is store in a
-	 * list of #cat: integers and returns its location if found. Input: item - value
-	 * to search for in list list - list of integers to be searched len - number of
-	 * integers in search list Return Code: Zero or greater - first location found
-	 * equal to search value Negative - search value not found in the list of
-	 * integers
-	 **************************************************************************/
+	/**
+	 * Determines whether a specified value is stored in a list of integers and
+	 * returns its location if found.
+	 * <p>
+	 * NIST: {@code in_int_list()}.
+	 *
+	 * @param item value to search for in list
+	 * @param list list of integers to be searched
+	 * @param len  number of integers in search list
+	 * @return zero or greater: first location found equal to the search value;
+	 *         negative ({@link ILfs#UNDEFINED}, -1): search value not found in
+	 *         the list
+	 */
 	public int getValueLocationInList(final int item, AtomicIntegerArray list, final int len) {
 		int i;
 
@@ -346,15 +401,21 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (ILfs.UNDEFINED);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: removeValueFromLocationInList - Takes a position index into an integer
-	 * list and #cat: removes the value from the list, collapsing the resulting
-	 * #cat: list. Input: index - position of value to be removed from list list -
-	 * input list of integers num - number of integers in the list Output: list -
-	 * list with specified integer removed num - decremented number of integers in
-	 * list Return Code: Zero - successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Takes a position index into an integer list and removes the value from the
+	 * list, collapsing the resulting list.
+	 * <p>
+	 * NIST: {@code remove_from_int_list()}. The remaining integers are slid up
+	 * over the removed position. NOTE: decrementing the number of integers
+	 * remaining in the list is the responsibility of the caller.
+	 *
+	 * @param index position of value to be removed from list
+	 * @param list  input/output: list of integers; on return the specified
+	 *              integer has been removed
+	 * @param num   number of integers in the list
+	 * @return zero ({@link ILfs#FALSE}) on successful completion; negative (-370)
+	 *         on system error (index out of range)
+	 */
 	public int removeValueFromLocationInList(final int index, AtomicIntegerArray list, final int num) {
 		int fr;
 		int to;
@@ -378,15 +439,19 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (ILfs.FALSE);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: findIncrementalPositionInDoubleArray - Takes a double value and a list
-	 * of doubles and #cat: determines where in the list the double may be inserted,
-	 * #cat: preserving the increasing sorted order of the list. Input: val - value
-	 * to be inserted into the list list - list of double in increasing sorted order
-	 * num - number of values in the list Return Code: Zero or Positive - insertion
-	 * position in the list
-	 **************************************************************************/
+	/**
+	 * Takes a double value and a list of doubles and determines where in the
+	 * list the value may be inserted, preserving the increasing sorted order of
+	 * the list.
+	 * <p>
+	 * NIST: {@code find_incr_position_dbl()}.
+	 *
+	 * @param val  value to be inserted into the list
+	 * @param list list of doubles in increasing sorted order
+	 * @param num  number of values in the list
+	 * @return zero or positive: insertion position in the list ({@code num} if
+	 *         the value belongs at the end)
+	 */
 	public int findIncrementalPositionInDoubleArray(final double val, AtomicReferenceArray<Double> list,
 			final int num) {
 		int i;
@@ -409,13 +474,20 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (i);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: angleToLine - Takes two coordinate points and computes the angle #cat:
-	 * to the line formed by the two points. Input: fx - x-coord of first point fy -
-	 * y-coord of first point tx - x-coord of second point ty - y-coord of second
-	 * point Return Code: Angle - angle to the specified line
-	 **************************************************************************/
+	/**
+	 * Takes two coordinate points and computes the angle to the line formed by
+	 * the two points.
+	 * <p>
+	 * NIST: {@code angle2line()}. The y delta is inverted so that the angle is
+	 * measured in a conventional (y-up) frame; if both deltas are smaller than
+	 * {@link ILfs#MIN_SLOPE_DELTA} the angle is 0.
+	 *
+	 * @param fx x-coord of first point
+	 * @param fy y-coord of first point
+	 * @param tx x-coord of second point
+	 * @param ty y-coord of second point
+	 * @return the angle (in radians, range -PI..PI) to the specified line
+	 */
 	public double angleToLine(final int fx, final int fy, final int tx, final int ty) {
 		double dx;
 		double dy;
@@ -437,16 +509,23 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (theta);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: lineToDirection - Takes two coordinate points and computes the #cat:
-	 * directon (on a full circle) in which the first points #cat: to the second.
-	 * Input: fx - x-coord of first point (pointing from) fy - y-coord of first
-	 * point (pointing from) tx - x-coord of second point (pointing to) ty - y-coord
-	 * of second point (pointing to) noOfPossibleDirs - number of IMAP directions
-	 * (in semicircle) Return Code: Direction - determined direction on a "full"
-	 * circle
-	 **************************************************************************/
+	/**
+	 * Takes two coordinate points and computes the direction (on a full circle)
+	 * in which the first point points to the second.
+	 * <p>
+	 * NIST: {@code line2direction()}. Coordinates are swapped and the order of
+	 * points reversed so that direction 0 is vertical and positive direction is
+	 * clockwise. The angle is converted to an integer direction on the range
+	 * [0..2*noOfPossibleDirs), truncating precision to {@link ILfs#TRUNC_SCALE}
+	 * before rounding.
+	 *
+	 * @param fx               x-coord of first point (pointing from)
+	 * @param fy               y-coord of first point (pointing from)
+	 * @param tx               x-coord of second point (pointing to)
+	 * @param ty               y-coord of second point (pointing to)
+	 * @param noOfPossibleDirs number of IMAP directions (in semicircle)
+	 * @return the determined direction on a "full" circle
+	 */
 	public int lineToDirection(final int fx, final int fy, final int tx, final int ty, final int noOfPossibleDirs) {
 		double theta;
 		double piFactor;
@@ -483,15 +562,19 @@ public class LfsUtil extends MindTct implements ILfsUtil {
 		return (iDir);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: closestDirDistance - Takes to integer IMAP directions and determines
-	 * the #cat: closest distance between them accounting for #cat: wrap-around
-	 * either at the beginning or ending of #cat: the range of directions. Input:
-	 * dir1 - integer value of the first direction dir2 - integer value of the
-	 * second direction noOfPossibleDirs - the number of possible directions Return
-	 * Code: Non-negative - distance between the 2 directions
-	 **************************************************************************/
+	/**
+	 * Takes two integer IMAP directions and determines the closest distance
+	 * between them, accounting for wrap-around either at the beginning or ending
+	 * of the range of directions.
+	 * <p>
+	 * NIST: {@code closest_dir_dist()}.
+	 *
+	 * @param dir1             integer value of the first direction
+	 * @param dir2             integer value of the second direction
+	 * @param noOfPossibleDirs the number of possible directions
+	 * @return non-negative: distance between the two directions;
+	 *         {@link ILfs#INVALID_DIR} (-1) if either direction is invalid
+	 */
 	public int closestDirDistance(final int dir1, final int dir2, final int noOfPossibleDirs) {
 		int distance1;
 		int distance2;

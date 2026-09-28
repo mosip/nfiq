@@ -11,14 +11,34 @@ import org.mosip.nist.nfiq1.common.ILfs.LfsParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Block-level image partitioning and map utilities for MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code block.c} ({@code block_offsets}, {@code low_contrast_block},
+ * {@code find_valid_block}, {@code set_margin_blocks}). MINDTCT analyses the fingerprint in fixed-size blocks
+ * (e.g. 8 x 8 pixels); these routines compute block origins in the padded image, flag low-contrast blocks, walk
+ * the maps looking for valid neighbouring directions, and set map borders.
+ * <p>
+ * Lazily created singleton; {@link #getInstance()} is synchronized and the class keeps no mutable state.
+ */
 public class Block extends MindTct implements IBlock {
+	/** SLF4J logger for input and processing errors. */
 	private static final Logger logger = LoggerFactory.getLogger(Block.class);
+	/** Lazily initialized singleton instance; guarded by the class lock in {@link #getInstance()}. */
 	private static Block instance;
 
+	/**
+	 * Private constructor enforcing the singleton pattern; use {@link #getInstance()}.
+	 */
 	private Block() {
 		super();
 	}
 
+	/**
+	 * Returns the shared {@code Block} singleton, creating it on first use.
+	 *
+	 * @return the singleton instance (never {@code null})
+	 */
 	public static synchronized Block getInstance() {
 		if (instance == null) {
 			instance = new Block();
@@ -26,35 +46,37 @@ public class Block extends MindTct implements IBlock {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared numeric-definitions helper (rounding and precision truncation).
+	 *
+	 * @return the {@link Defs} singleton
+	 */
 	public Defs getDefs() {
 		return Defs.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: blockOffsets - Divides an image into mw X mh equally sized blocks,
-	 * #cat: returning a list of offsets to the top left corner of each block. #cat:
-	 * For images that are even multiples of BLOCKSIZE, blocks do not #cat: not
-	 * overlap and are immediately adjacent to each other. For image #cat: that are
-	 * NOT even multiples of BLOCKSIZE, blocks continue to be #cat: non-overlapping
-	 * up to the last column and/or last row of blocks. #cat: In these cases the
-	 * blocks are adjacent to the edge of the image and #cat: extend inwards
-	 * BLOCKSIZE units, overlapping the neighboring column #cat: or row of blocks.
-	 * This routine also accounts for image padding #cat: which makes things a
-	 * little more "messy". This routine is primarily #cat: responsible providing
-	 * the ability to processs arbitrarily-sized #cat: images. The strategy used
-	 * here is simple, but others are possible. Input: imageWidth - width (in
-	 * pixels) of the orginal input image imageHeight - height (in pixels) of the
-	 * orginal input image pad - the padding (in pixels) required to support the
-	 * desired range of block orientations for DFT analysis. This padding is
-	 * required along the entire perimeter of the input image. For certain
-	 * applications, the pad may be zero. blockSize - the width and height (in
-	 * pixels) of each image block Output: blockOffsets - points to the list of
-	 * pixel offsets to the origin of each block in the "padded" input image
-	 * oImageWidth - the number of horizontal blocks in the input image oImageHeight
-	 * - the number of vertical blocks in the input image Return Code: Zero -
-	 * successful completion Negative - system error
-	 **************************************************************************/
+	/**
+	 * Divides an image into {@code mw x mh} equally sized blocks and returns the offset of each block's
+	 * top-left corner in the padded image (NIST {@code block_offsets}).
+	 * <p>
+	 * For images whose dimensions are exact multiples of BLOCKSIZE, blocks do not overlap and sit right next to
+	 * each other. Otherwise, blocks stay non-overlapping up to the last column and/or row; the last column/row
+	 * of blocks is placed against the image edge and extends BLOCKSIZE pixels inwards, overlapping its
+	 * neighbours. The routine also accounts for image padding, which makes things a little more "messy". It is
+	 * what lets MINDTCT process images of arbitrary size; the strategy is simple, but others are possible.
+	 *
+	 * @param ret          output: 0 ({@link ILfs#FALSE}) on success; {@link ILfs#ERROR_CODE_80} if the image
+	 *                     is smaller than one block
+	 * @param oImageWidth  output: number of horizontal blocks in the image
+	 * @param oImageHeight output: number of vertical blocks in the image
+	 * @param imageWidth   width (in pixels) of the original (unpadded) input image
+	 * @param imageHeight  height (in pixels) of the original (unpadded) input image
+	 * @param pad          padding (in pixels) needed around the whole image to support the desired range of
+	 *                     block orientations for DFT analysis; may be zero for some applications
+	 * @param blockSize    width and height (in pixels) of each image block
+	 * @return the pixel offsets to the origin of each block in the padded input image (row-major block order),
+	 *         or {@code null} on error
+	 */
 	public AtomicIntegerArray blockOffsets(AtomicInteger ret, AtomicInteger oImageWidth, AtomicInteger oImageHeight,
 			int imageWidth, int imageHeight, int pad, int blockSize) {
 		AtomicIntegerArray blockOffsets;
@@ -161,21 +183,26 @@ public class Block extends MindTct implements IBlock {
 		return blockOffsets;
 	}
 
-	/*************************************************************************
-	 * #cat: lowContrastBlock - Takes the offset to an image block of specified
-	 * #cat: dimension, and analyzes the pixel intensities in the block #cat: to
-	 * determine if there is sufficient contrast for further #cat: processing.
-	 * Input: blockOffset - byte offset into the padded input image to the origin of
-	 * the block to be analyzed blockSize - dimension (in pixels) of the width and
-	 * height of the block (passing separate blocksize from LFSPARMS on purpose)
-	 * paddedImageData - padded input image data (8 bits [0..256) grayscale)
-	 * paddedImageWidth - width (in pixels) of the padded input image
-	 * paddedImageHeight - height (in pixels) of the padded input image lfsparms -
-	 * parameters and thresholds for controlling LFS Return Code: TRUE - block has
-	 * sufficiently low contrast FALSE - block has sufficiently hight contrast
-	 * Negative - system error
-	 **************************************************************************
-	 **************************************************************************/
+	/**
+	 * Decides whether an image block has too little contrast for further processing (NIST
+	 * {@code low_contrast_block}).
+	 * <p>
+	 * Builds a histogram of the block's pixel intensities and finds the pixel values at the lower and upper
+	 * {@code lfsparms.getPercentileMinMax()} percentiles. If their difference is below
+	 * {@code lfsparms.getMinContrastDelta()}, the block is low contrast. The histogram has
+	 * {@link ILfs#IMG_6BIT_PIX_LIMIT} bins, so pixel values are expected to fit that range.
+	 *
+	 * @param blockOffset       offset into the padded input image to the origin of the block to analyse
+	 * @param blockSize         width and height (in pixels) of the block (passed separately from LFSPARMS on
+	 *                          purpose)
+	 * @param paddedImageData   padded input image data (8-bit grayscale)
+	 * @param paddedImageWidth  width (in pixels) of the padded input image
+	 * @param paddedImageHeight height (in pixels) of the padded input image
+	 * @param lfsparms          parameters and thresholds that control LFS
+	 * @return {@link ILfs#TRUE} if the block has low contrast; {@link ILfs#FALSE} if it has enough contrast;
+	 *         {@link ILfs#ERROR_CODE_510} / {@link ILfs#ERROR_CODE_511} (negative system errors) if the min / max
+	 *         percentile pixel cannot be found
+	 */
 	public int lowContrastBlock(int blockOffset, int blockSize, int[] paddedImageData, int paddedImageWidth,
 			int paddedImageHeight, LfsParams lfsparms) {
 		int[] pixTable = new int[ILfs.IMG_6BIT_PIX_LIMIT];
@@ -250,25 +277,28 @@ public class Block extends MindTct implements IBlock {
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: findValidBlock - Take a Direction Map, Low Contrast Map, #cat: Starting
-	 * block address, a direction and searches the #cat: maps in the specified
-	 * direction until either a block valid #cat: direction is encountered or a
-	 * block flagged as LOW CONTRAST #cat: is encountered. If a valid direction is
-	 * located, it and the #cat: address of the corresponding block are returned
-	 * with a #cat: code of FOUND. Otherwise, a code of NOT_FOUND is returned.
-	 * Input: directionMap - map of blocks containing directional ridge flows
-	 * lowContrastMap - map of blocks flagged as LOW CONTRAST startX - X-block coord
-	 * where search starts in maps startY - Y-block coord where search starts in
-	 * maps mappedImageWidth - number of blocks horizontally in the maps
-	 * mappedImageHeight - number of blocks vertically in the maps xIncr - X-block
-	 * increment to direct search yIncr - Y-block increment to direct search Output:
-	 * nbrDir - valid direction found nbrX - X-block coord where valid direction
-	 * found nbrY - Y-block coord where valid direction found Return Code: FOUND -
-	 * neighboring block with valid direction found NOT_FOUND - neighboring block
-	 * with valid direction NOT found
-	 **************************************************************************/
+	/**
+	 * Walks the maps from a starting block in a fixed direction until it finds a block with a valid direction or
+	 * hits a LOW CONTRAST block (NIST {@code find_valid_block}).
+	 * <p>
+	 * The search starts at {@code (startX + xIncr, startY + yIncr)} and keeps adding the increments until it
+	 * leaves the map. If a valid direction (value {@code >= 0}) is found, the direction and the block's
+	 * coordinates are returned with {@link ILfs#FOUND}.
+	 *
+	 * @param nbrDir            output: the valid direction found
+	 * @param nbrX              output: X-block coordinate where the valid direction was found
+	 * @param nbrY              output: Y-block coordinate where the valid direction was found
+	 * @param directionMap      map of blocks holding ridge-flow directions
+	 * @param lowContrastMap    map of blocks flagged as LOW CONTRAST (1 = low contrast)
+	 * @param startX            X-block coordinate where the search starts
+	 * @param startY            Y-block coordinate where the search starts
+	 * @param mappedImageWidth  number of blocks horizontally in the maps
+	 * @param mappedImageHeight number of blocks vertically in the maps
+	 * @param xIncr             X-block increment that sets the search direction
+	 * @param yIncr             Y-block increment that sets the search direction
+	 * @return {@link ILfs#FOUND} if a neighbouring block with a valid direction was found, otherwise
+	 *         {@link ILfs#NOT_FOUND}
+	 */
 	public int findValidBlock(AtomicInteger nbrDir, AtomicInteger nbrX, AtomicInteger nbrY,
 			AtomicIntegerArray directionMap, AtomicIntegerArray lowContrastMap, int startX, int startY,
 			int mappedImageWidth, int mappedImageHeight, int xIncr, int yIncr) {
@@ -305,14 +335,14 @@ public class Block extends MindTct implements IBlock {
 		return (ILfs.NOT_FOUND);
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: setMarginBlocks - Take an image map and sets its perimeter values to
-	 * #cat: the specified value. Input: oMap - map of blocks to be modified
-	 * mappedImageWidth - number of blocks horizontally in the map mappedImageHeight
-	 * - number of blocks vertically in the map marginValue - value to be assigned
-	 * to the perimeter blocks Output: oMap - resulting map
-	 **************************************************************************/
+	/**
+	 * Sets every block on the perimeter of a map to a given value (NIST {@code set_margin_blocks}).
+	 *
+	 * @param oMap              input/output: the map of blocks to modify (row-major), updated in place
+	 * @param mappedImageWidth  number of blocks horizontally in the map
+	 * @param mappedImageHeight number of blocks vertically in the map
+	 * @param marginValue       value to assign to the perimeter blocks
+	 */
 	public void setMarginBlocks(AtomicIntegerArray oMap, int mappedImageWidth, int mappedImageHeight, int marginValue) {
 		int mapIndex1;
 		int mapIndex2;

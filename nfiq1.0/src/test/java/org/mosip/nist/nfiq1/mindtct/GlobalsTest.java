@@ -1,5 +1,6 @@
 package org.mosip.nist.nfiq1.mindtct;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,12 +18,42 @@ class GlobalsTest {
 
     private Globals globals;
 
+    /** Original singleton state, restored after each test so other test classes are not polluted. */
+    private double[] savedDftCoefs;
+    private LfsParams savedLfsParams;
+    private LfsParams savedLfsParamsV2;
+    private int[] savedNbr8Dx;
+    private int[] savedNbr8Dy;
+    private int[] savedChaincodesNbr8;
+    private FeaturePattern[] savedFeaturePatterns;
+
     /**
-     * Sets up the Globals instance before each execution
+     * Sets up the Globals instance before each execution and snapshots its mutable state
      */
     @BeforeEach
     void setUp() {
         globals = Globals.getInstance();
+        savedDftCoefs = globals.getDftCoefs();
+        savedLfsParams = globals.getLfsParams();
+        savedLfsParamsV2 = globals.getLfsParamsV2();
+        savedNbr8Dx = globals.getNbr8Dx();
+        savedNbr8Dy = globals.getNbr8Dy();
+        savedChaincodesNbr8 = globals.getChaincodesNbr8();
+        savedFeaturePatterns = globals.getFeaturePatterns();
+    }
+
+    /**
+     * Restores the singleton state captured in {@link #setUp()}
+     */
+    @AfterEach
+    void tearDown() {
+        globals.setDftCoefs(savedDftCoefs);
+        globals.setLfsParams(savedLfsParams);
+        globals.setLfsParamsV2(savedLfsParamsV2);
+        globals.setNbr8Dx(savedNbr8Dx);
+        globals.setNbr8Dy(savedNbr8Dy);
+        globals.setChaincodesNbr8(savedChaincodesNbr8);
+        globals.setFeaturePatterns(savedFeaturePatterns);
     }
 
     /**

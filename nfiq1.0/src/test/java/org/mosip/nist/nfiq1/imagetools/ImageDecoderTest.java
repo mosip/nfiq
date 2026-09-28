@@ -218,7 +218,7 @@ class ImageDecoderTest {
         ImageDecoder decoder = ImageDecoder.getInstance();
 
         BufferedImage result = decoder.readAndDecodeImage(
-                returnCode, "info_jp2.iso", imageType, oLength, oWidth, oHeight, oDepth, oPPI, ofileType);
+                returnCode, "src/test/resources/info_jp2.iso", imageType, oLength, oWidth, oHeight, oDepth, oPPI, ofileType);
 
         if (result != null) {
             Assertions.assertEquals(ILfs.FALSE, returnCode.get());
@@ -239,7 +239,7 @@ class ImageDecoderTest {
         ImageDecoder decoder = ImageDecoder.getInstance();
 
         BufferedImage result = decoder.readAndDecodeImage(
-                returnCode, "info_wsq.iso", imageType, oLength, oWidth, oHeight, oDepth, oPPI, ofileType);
+                returnCode, "src/test/resources/info_wsq.iso", imageType, oLength, oWidth, oHeight, oDepth, oPPI, ofileType);
 
         if (result != null) {
             Assertions.assertEquals(ILfs.FALSE, returnCode.get());

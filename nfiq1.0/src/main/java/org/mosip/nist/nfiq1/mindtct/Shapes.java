@@ -15,14 +15,36 @@ import org.mosip.nist.nfiq1.common.ILfs.Shape;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Shape (scanline region) construction from closed contours for MINDTCT.
+ * <p>
+ * Port of NIST LFS {@code shape.c}. A {@link Shape} represents a closed region
+ * as a list of scanline {@link Rows}, each holding the contour x-coords on that
+ * row in left-to-right order. Shapes are derived from loop contours and are
+ * used, for example, when filling or measuring small loops/islands during
+ * false-minutia removal.
+ * <p>
+ * Implemented as a lazily created singleton; {@link #getInstance()} is
+ * synchronized and the class keeps no mutable state.
+ */
 public class Shapes extends MindTct implements IShapes {
+	/** SLF4J logger for diagnostics and error reporting in this class. */
 	private static final Logger logger = LoggerFactory.getLogger(Shapes.class);
+	/** Lazily created singleton instance, see {@link #getInstance()}. */
 	private static Shapes instance;
 
+	/**
+	 * Private constructor; use {@link #getInstance()} to obtain the singleton.
+	 */
 	private Shapes() {
 		super();
 	}
 
+	/**
+	 * Returns the shared singleton instance, creating it on first use.
+	 *
+	 * @return the singleton {@code Shapes} instance
+	 */
 	public static synchronized Shapes getInstance() {
 		if (instance == null) {
 			synchronized (Shapes.class) {
@@ -34,31 +56,61 @@ public class Shapes extends MindTct implements IShapes {
 		return instance;
 	}
 
+	/**
+	 * Returns the shared {@link Free} helper used to release structures.
+	 *
+	 * @return the {@code Free} singleton
+	 */
 	public Free getFree() {
 		return Free.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Contour} helper (contour limits).
+	 *
+	 * @return the {@code Contour} singleton
+	 */
 	public Contour getContour() {
 		return Contour.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link LfsUtil} helper (list searching).
+	 *
+	 * @return the {@code LfsUtil} singleton
+	 */
 	public LfsUtil getLfsUtil() {
 		return LfsUtil.getInstance();
 	}
 
+	/**
+	 * Returns the shared {@link Sort} helper (bubble sort).
+	 *
+	 * @return the {@code Sort} singleton
+	 */
 	public Sort getSort() {
 		return Sort.getInstance();
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: Constructor allocShape - Allocates and initializes a shape structure
-	 * given the #cat: the X and Y limits of the shape. Input: xMin - left-most
-	 * x-coord in shape yMin - top-most y-coord in shape xMax - right-most x-coord
-	 * in shape yMax - bottom-most y-coord in shape Output: ret - Zero - Shape
-	 * successfully allocated and initialized - Negative - System error Return Code:
-	 * shape - pointer to the allocated & initialized shape structure
-	 **************************************************************************/
+	/**
+	 * Allocates and initializes a shape structure given the X and Y limits of
+	 * the shape.
+	 * <p>
+	 * NIST: {@code alloc_shape()}. One row is allocated per scanline from
+	 * {@code yMin} to {@code yMax} inclusive, and each row gets capacity for
+	 * {@code xMax - xMin + 1} x-coords (the maximum number of contiguous pixels
+	 * on a row, which is sufficiently larger than the number of actual contour
+	 * points). Every row starts with zero points assigned.
+	 *
+	 * @param ret  output: set to zero ({@link ILfs#FALSE}) when the shape is
+	 *             successfully allocated and initialized (negative would indicate
+	 *             a system error)
+	 * @param xMin left-most x-coord in shape
+	 * @param yMin top-most y-coord in shape
+	 * @param xMax right-most x-coord in shape
+	 * @param yMax bottom-most y-coord in shape
+	 * @return the allocated and initialized shape structure
+	 */
 	public Shape allocShape(AtomicInteger ret, int xMin, int yMin, int xMax, int yMax) {
 		Shape shape = new Shape();
 
@@ -110,11 +162,14 @@ public class Shapes extends MindTct implements IShapes {
 		return shape;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: freeShape - Deallocates a shape structure and all its allocated #cat:
-	 * attributes. Input: shape - pointer to the shape structure to be deallocated
-	 **************************************************************************/
+	/**
+	 * Deallocates a shape structure and all its allocated attributes.
+	 * <p>
+	 * NIST: {@code free_shape()}. Releases each row's x-coord list and row
+	 * structure via {@link Free}, then clears the shape's row list reference.
+	 *
+	 * @param shape the shape structure to be deallocated (modified in place)
+	 */
 	public void freeShape(Shape shape) {
 		int i;
 		/* Foreach allocated row in the shape ... */
@@ -130,13 +185,17 @@ public class Shapes extends MindTct implements IShapes {
 		/* Deallocate the shape structure. */
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: dumpShape - Takes an initialized shape structure and dumps its contents
-	 * #cat: as formatted text to the specified open file pointer. Input: shape -
-	 * shape structure to be dumped Output: file - open file pointer to be written
-	 * to
-	 **************************************************************************/
+	/**
+	 * Takes an initialized shape structure and dumps its contents as formatted
+	 * text to the specified file.
+	 * <p>
+	 * NIST: {@code dump_shape()}. Writes the shape's y-limits and number of
+	 * scanlines, then each row's y-coord, point count and points. The file is
+	 * (re)created/overwritten; I/O errors are logged rather than thrown.
+	 *
+	 * @param file  output file to be written to
+	 * @param shape shape structure to be dumped
+	 */
 	public void dumpShape(File file, Shape shape) {
 		int i;
 		int j;
@@ -158,23 +217,30 @@ public class Shapes extends MindTct implements IShapes {
 				}
 			}
 
-			logger.info("Successfully wrote Shapes to the file.");
+			logger.debug("Successfully wrote Shapes to the file.");
 		} catch (IOException e) {
 			logger.error("An error occurred.", e);
 		}
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: shapeFromContour - Converts a contour list that has been determined
-	 * #cat: to form a complete loop into a shape representation where #cat: the
-	 * contour points on each contiguous scanline of the shape #cat: are stored in
-	 * left-to-right order. Input: oContourX - x-coord list for loop's contour
-	 * points oContourY - y-coord list for loop's contour points noOfContour -
-	 * number of points in contour Output: shape - points to the resulting shape
-	 * structure Return Code: Zero - shape successfully derived Negative - system
-	 * error
-	 **************************************************************************/
+	/**
+	 * Converts a contour list that has been determined to form a complete loop
+	 * into a shape representation where the contour points on each contiguous
+	 * scanline of the shape are stored in left-to-right order.
+	 * <p>
+	 * NIST: {@code shape_from_contour()}. Points re-encountered on the contour
+	 * (e.g. at "pinching" points of complex shapes) are stored only once per
+	 * row.
+	 *
+	 * @param ret         output: zero ({@link ILfs#FALSE}) if the shape was
+	 *                    successfully derived; negative on system error (e.g.
+	 *                    -260 on row overflow)
+	 * @param oContourX   x-coord list for the loop's contour points
+	 * @param oContourY   y-coord list for the loop's contour points
+	 * @param noOfContour number of points in contour
+	 * @return the resulting shape structure (possibly partially filled if
+	 *         {@code ret} reports an error)
+	 */
 	public Shape shapeFromContour(AtomicInteger ret, AtomicIntegerArray oContourX, AtomicIntegerArray oContourY,
 			final int noOfContour) {
 		Shape shape = null;
@@ -235,12 +301,15 @@ public class Shapes extends MindTct implements IShapes {
 		return shape;
 	}
 
-	/*************************************************************************
-	 **************************************************************************
-	 * #cat: sortRowLeftToRightOnX - Takes a row structure and sorts its points
-	 * left-to- #cat: right on X. Input: row - row structure to be sorted output:
-	 * row - row structure with points in sorted order
-	 **************************************************************************/
+	/**
+	 * Takes a row structure and sorts its points left-to-right on X.
+	 * <p>
+	 * NIST: {@code sort_row_on_x()}. Uses a simple increasing bubble sort, which
+	 * is satisfactory as the number of points will be relatively small.
+	 *
+	 * @param row input/output: row structure to be sorted; on return its points
+	 *            are in increasing x order
+	 */
 	public void sortRowLeftToRightOnX(Rows row) {
 		/* Conduct a simple increasing bubble sort on the x-coords */
 		/* in the given row. A bubble sort is satisfactory as the */
